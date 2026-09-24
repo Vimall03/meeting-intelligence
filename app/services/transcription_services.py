@@ -1,20 +1,57 @@
-from faster_whisper import WhisperModel
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"\s*torchcodec is not installed correctly.*",
+    category=UserWarning,
+)
+
 from app.core.config import settings
+import whisperx
+from whisperx.diarize import DiarizationPipeline
 
-model_size = settings.whisper_model_size
 
-print(f"Loading Whisper model... {model_size}")
+model = whisperx.load_model(
+    settings.whisperx_model_size,
+    settings.whisperx_device,
+    compute_type=settings.whisperx_model_compute_type,
+    language="en",
+)
 
-model = WhisperModel(model_size, device=settings.whisper_model_device, compute_type=settings.whisper_model_compute_type) 
-
-print("Whisper model loaded successfully")
+def simplify_transcript(result):
+    return {
+        "segments": [
+            {
+                "speaker": segment.get("speaker", "UNKNOWN"),
+                "start": segment["start"],
+                "end": segment["end"],
+                "text": segment["text"].strip()
+            }
+            for segment in result["segments"]
+        ]
+    }
 
 def transcribe_audio(file_path: str):
-    segments, info = model.transcribe(file_path)
+    audio = whisperx.load_audio(file_path)
+    result = model.transcribe(audio)
+    model_a, metadata = whisperx.load_align_model(
+        language_code=result["language"],
+        device=settings.whisperx_device
+    )
+    result = whisperx.align(
+        result["segments"],
+        model_a,
+        metadata,
+        audio,
+        settings.whisperx_device
+    )
     
-    text = " ".join(segment.text for segment in segments) 
-    return {
-        "text": text,
-        "language": info.language
-    }
+    diarize_model = DiarizationPipeline(device=settings.whisperx_device, token=settings.hf_auth_token)
+    diarize_segments = diarize_model(audio)
     
+    result = whisperx.assign_word_speakers(
+        diarize_segments,
+        result
+    )
+    result = simplify_transcript(result)
+    return(result)
