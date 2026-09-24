@@ -6,8 +6,9 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-from backend.app.core.config import settings
+from app.core.config import settings
 import whisperx
+from whisperx.audio import SAMPLE_RATE
 from whisperx.diarize import DiarizationPipeline
 
 
@@ -55,3 +56,33 @@ def transcribe_audio(file_path: str):
     )
     result = simplify_transcript(result)
     return(result)
+
+def transcribe_realtime_chunk(file_path: str, start_seconds: float = 0.0):
+    """
+    Fast transcription for live meeting audio chunks.
+    No alignment.
+    No diarization.
+    """
+
+    audio = whisperx.load_audio(file_path)
+    audio_duration = len(audio) / SAMPLE_RATE
+    chunk_start = min(start_seconds, audio_duration)
+    audio = audio[int(chunk_start * SAMPLE_RATE):]
+
+    if not len(audio):
+        return {"segments": [], "audio_duration": audio_duration}
+
+    result = model.transcribe(audio)
+
+    return {
+        "segments": [
+            {
+                "start": segment["start"] + chunk_start,
+                "end": segment["end"] + chunk_start,
+                "text": segment["text"].strip()
+            }
+            for segment in result["segments"]
+            if segment["text"].strip()
+        ],
+        "audio_duration": audio_duration,
+    }

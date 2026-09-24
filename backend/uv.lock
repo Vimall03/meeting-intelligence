@@ -34,6 +34,7 @@ dependencies = [
     { name = "faster-whisper" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
+    { name = "websockets" },
     { name = "whisperx" },
 ]
 
@@ -43,6 +44,7 @@ requires-dist = [
     { name = "faster-whisper", specifier = ">=1.2.1" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
+    { name = "websockets", specifier = ">=17.1" },
     { name = "whisperx", specifier = ">=3.8.6" },
 ]
 

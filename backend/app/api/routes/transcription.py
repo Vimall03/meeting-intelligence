@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, UploadFile, File
 from fastapi.concurrency import run_in_threadpool
 
-from backend.app.services.transcription_services import transcribe_audio
+from app.services.transcription_services import transcribe_audio
 router = APIRouter()
 
 @router.post('/transcribe')

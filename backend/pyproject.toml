@@ -9,5 +9,6 @@ dependencies = [
     "faster-whisper>=1.2.1",
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.3",
+    "websockets>=17.1",
     "whisperx>=3.8.6",
 ]
