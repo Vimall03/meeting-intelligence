@@ -6,7 +6,7 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-from app.core.config import settings
+from backend.app.core.config import settings
 import whisperx
 from whisperx.diarize import DiarizationPipeline
 
