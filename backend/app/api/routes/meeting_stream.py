@@ -10,8 +10,10 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.services.event_service import EventService, MeetingEvent
+from app.services.jev_service import JevDecision, JevService
+from app.services.llm_service import LlmResult, LlmService
 from app.services.meeting_context_service import MeetingContextService
-from app.services.jev_routing_service import JevRoutingDecision, JevRoutingService
 from app.services.transcription_services import transcribe_realtime_chunk
 
 router = APIRouter()
@@ -37,8 +39,8 @@ async def transcribe_snapshot(audio: bytes) -> dict:
 
 async def evaluate_new_context(
     meeting_context: MeetingContextService,
-    jev: JevRoutingService,
-) -> tuple[JevRoutingDecision, str]:
+    jev: JevService,
+) -> tuple[JevDecision, str]:
     snapshot = meeting_context.prepare_jev_context()
     if snapshot is None:
         raise RuntimeError("Jev evaluation started without new context")
@@ -58,7 +60,7 @@ async def meeting_stream(websocket: WebSocket):
     transcription_task: asyncio.Task[dict] | None = None
     transcription_started_at: float | None = None
     jev = (
-        JevRoutingService(
+        JevService(
             api_key=settings.openrouter_api_key,
             model=settings.jev_model,
             endpoint=settings.jev_decisions_url,
@@ -66,11 +68,40 @@ async def meeting_stream(websocket: WebSocket):
         if settings.openrouter_api_key
         else None
     )
-    jev_task: asyncio.Task[tuple[JevRoutingDecision, str]] | None = None
+    llm = (
+        LlmService(
+            api_key=settings.openrouter_api_key,
+            model=settings.gemma_model,
+            endpoint=settings.gemma_chat_completions_url,
+        )
+        if settings.openrouter_api_key
+        else None
+    )
+    event_service = EventService(
+        search_threshold=settings.jev_search_threshold,
+        task_threshold=settings.jev_task_threshold,
+        dedupe_window_seconds=settings.jev_dedup_window_seconds,
+    )
+    jev_task: asyncio.Task[tuple[JevDecision, str]] | None = None
     jev_evaluation_requested = False
-    last_dispatched_jev_at: dict[str, float] = {}
+    llm_tasks: list[tuple[asyncio.Task[LlmResult], float]] = []
     if jev is None:
         logger.warning("Jev routing disabled: OPENROUTER_API_KEY is not configured")
+
+    async def dispatch_events(events: list[MeetingEvent]) -> None:
+        for event in events:
+            await websocket.send_json(
+                {
+                    "type": "jev_decision",
+                    "decision": event.type,
+                    "confidence": event.score,
+                }
+            )
+            if llm is not None:
+                llm_tasks.append(
+                    (asyncio.create_task(llm.process_event(event)), time.monotonic())
+                )
+
     try:
         while True:
             try:
@@ -115,6 +146,16 @@ async def meeting_stream(websocket: WebSocket):
                                 "s" if len(accepted_segments) != 1 else "",
                                 meeting_context.as_text(),
                             )
+                            new_text = " ".join(
+                                segment.text for segment in accepted_segments
+                            )
+                            await dispatch_events(
+                                event_service.enrich(
+                                    new_text,
+                                    recent_context=meeting_context.as_text(),
+                                    now=now,
+                                )
+                            )
                     elif not transcript["segments"]:
                         logger.info("No speech detected in the audio snapshot")
 
@@ -142,49 +183,61 @@ async def meeting_stream(websocket: WebSocket):
                 except Exception:
                     logger.exception("Jev routing failed")
                 else:
-                    candidates = (
-                        (
-                            "SEARCH_EXISTING_WORK",
-                            decision.search_existing_work_probability,
-                            settings.jev_search_threshold,
-                        ),
-                        (
-                            "SUGGEST_NEW_TASK",
-                            decision.suggest_new_task_probability,
-                            settings.jev_task_threshold,
-                        ),
+                    events = event_service.start_pending(
+                        decision,
+                        recent_context=meeting_context.as_text(),
+                        triggering_context=evaluated_new_context,
+                        now=now,
                     )
-                    triggered: list[str] = []
-                    suppressed: list[str] = []
-                    for action, probability, threshold in candidates:
-                        if probability < threshold:
-                            continue
-                        last_at = last_dispatched_jev_at.get(action)
-                        if last_at is not None and now - last_at < settings.jev_dedup_window_seconds:
-                            suppressed.append(action)
-                            continue
-                        last_dispatched_jev_at[action] = now
-                        triggered.append(action)
-                        await websocket.send_json(
-                            {
-                                "type": "jev_decision",
-                                "decision": action,
-                                "confidence": probability,
-                            }
-                        )
+                    await dispatch_events(events)
                     logger.info(
                         "JEV evaluation\n\nNEW:\n%s\n\n"
                         "SEARCH_EXISTING_WORK: %.2f\nSUGGEST_NEW_TASK:     %.2f\n\n"
-                        "Triggered:\n%s\n"
-                        "Suppressed (duplicate):\n%s\n"
+                        "Pending enrichment:\n%s\n"
+                        "Finalized:\n%s\n"
                         "Cost: %s",
                         evaluated_new_context,
                         decision.search_existing_work_probability,
                         decision.suggest_new_task_probability,
-                        "\n".join(triggered) if triggered else "none",
-                        "\n".join(suppressed) if suppressed else "none",
+                        "\n".join(event_service.pending_types()) or "none",
+                        "\n".join(event.type for event in events) if events else "none",
                         f"${decision.cost:.8f}" if decision.cost is not None else "unknown",
                     )
+
+            timed_out_events = event_service.check_timeouts(
+                recent_context=meeting_context.as_text(), now=now
+            )
+            await dispatch_events(timed_out_events)
+
+            if llm_tasks:
+                still_running: list[tuple[asyncio.Task[LlmResult], float]] = []
+                for task, started_at in llm_tasks:
+                    if not task.done():
+                        still_running.append((task, started_at))
+                        continue
+                    latency = now - started_at
+                    try:
+                        result = task.result()
+                    except Exception:
+                        logger.exception(
+                            "Gemma call failed after %.1f seconds", latency
+                        )
+                        continue
+                    logger.info(
+                        "Gemma result for %s in %.1f seconds: %s (cost: %s)",
+                        result.event_type,
+                        latency,
+                        result.data,
+                        f"${result.cost:.8f}" if result.cost is not None else "unknown",
+                    )
+                    await websocket.send_json(
+                        {
+                            "type": "llm_result",
+                            "decision": result.event_type,
+                            "data": result.data,
+                        }
+                    )
+                llm_tasks = still_running
 
             if (
                 jev is not None
@@ -207,5 +260,11 @@ async def meeting_stream(websocket: WebSocket):
             jev_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await jev_task
+        for task, _ in llm_tasks:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         if jev:
             await jev.close()
+        if llm:
+            await llm.close()

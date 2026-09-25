@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     jev_search_threshold: float = 0.75
     jev_task_threshold: float = 0.75
     jev_dedup_window_seconds: float = 90.0
+    gemma_model: str = "google/gemma-4-26b-a4b-it"
+    gemma_chat_completions_url: str = "https://openrouter.ai/api/v1/chat/completions"
     
 
 settings = Settings()
