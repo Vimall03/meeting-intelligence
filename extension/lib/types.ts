@@ -8,6 +8,16 @@ export interface JevDecision {
   receivedAt: number;
 }
 
+export interface RelatedDriveFile {
+  id: string;
+  name: string;
+  mime_type: string;
+  web_view_link?: string;
+  modified_time?: string;
+  matched_terms: string[];
+  relevance_score: number;
+}
+
 export interface ExtensionState {
   meetingStatus: MeetingStatus;
   meetingTabId?: number;
@@ -17,6 +27,9 @@ export interface ExtensionState {
   captureStatus: CaptureStatus;
   backendConnected: boolean;
   jevDecision?: JevDecision;
+  relatedFiles?: RelatedDriveFile[];
+  relatedFilesQuery?: string;
+  relatedFilesError?: string;
   error?: string;
 }
 

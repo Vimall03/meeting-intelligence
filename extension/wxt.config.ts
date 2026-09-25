@@ -7,7 +7,7 @@ export default defineConfig({
     description: 'Capture Google Meet and microphone audio and stream it to a local backend.',
     version: '0.1.0',
     permissions: ['activeTab', 'tabCapture', 'offscreen', 'storage', 'sidePanel'],
-    host_permissions: ['https://meet.google.com/*'],
+    host_permissions: ['https://meet.google.com/*', 'http://localhost:8000/*'],
     action: {
       default_title: 'Open Meeting Intelligence controls',
     },

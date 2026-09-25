@@ -1,5 +1,11 @@
 import type { ExtensionMessage, ExtensionState } from '../lib/types';
 import { MICROPHONE_PERMISSION_KEY } from '../lib/microphone-permission';
+import {
+  GOOGLE_DRIVE_AUTH_RESULT_KEY,
+  GOOGLE_DRIVE_AUTH_TAB_KEY,
+  GOOGLE_DRIVE_STATUS_URL,
+  isGoogleDriveCallbackUrl,
+} from '../lib/config';
 
 type SidePanelLifecycle = {
   onOpened?: { addListener: (listener: (info: { tabId?: number; windowId: number }) => void) => void };
@@ -8,6 +14,7 @@ type SidePanelLifecycle = {
 
 const OFFSCREEN_URL = 'offscreen-page.html';
 const meetingStatuses = new Map<number, ExtensionState['meetingStatus']>();
+const processingDriveOAuthTabs = new Set<number>();
 let state: ExtensionState = {
   meetingStatus: 'unknown',
   captureStatus: 'idle',
@@ -224,7 +231,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
 async function stopCapture() {
   const result = await chrome.runtime.sendMessage({ type: 'STOP_OFFSCREEN' }).catch(() => undefined) as { ok?: boolean } | undefined;
   if (result && !result.ok) throw new Error('Could not release the audio capture. Try stopping it again.');
-  state = { ...state, captureStatus: 'idle', captureTabId: undefined, backendConnected: false, jevDecision: undefined, error: undefined };
+  state = { ...state, captureStatus: 'idle', captureTabId: undefined, backendConnected: false, jevDecision: undefined, relatedFiles: undefined, relatedFilesQuery: undefined, relatedFilesError: undefined, error: undefined };
   await broadcast();
 }
 
@@ -240,6 +247,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     void broadcast();
   }
   if (state.captureTabId === tabId && state.captureStatus !== 'idle') void enqueue(stopCapture);
+  void handleGoogleDriveOAuthTabClosed(tabId);
 });
 
 chrome.tabs.onUpdated.addListener((tabId, change) => {
@@ -249,6 +257,86 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
   } catch { /* A non-Meet URL revokes the activeTab grant. */ }
   state = { ...state, tabAudioAuthorizedTabIds: state.tabAudioAuthorizedTabIds.filter((id) => id !== tabId) };
   void broadcast();
+});
+
+async function handleGoogleDriveOAuthNavigation(tabId: number, url: string) {
+  if (processingDriveOAuthTabs.has(tabId)) return;
+  processingDriveOAuthTabs.add(tabId);
+  try {
+    const stored = await chrome.storage.local.get(GOOGLE_DRIVE_AUTH_TAB_KEY);
+    const pending = stored[GOOGLE_DRIVE_AUTH_TAB_KEY] as { tabId?: number; redirectUri?: string } | undefined;
+    if (pending?.tabId !== tabId || !pending.redirectUri || !isGoogleDriveCallbackUrl(url, pending.redirectUri)) return;
+
+    const callback = new URL(url);
+    const oauthError = callback.searchParams.get('error');
+    if (oauthError) {
+      await chrome.storage.local.set({
+        [GOOGLE_DRIVE_AUTH_RESULT_KEY]: {
+          connected: false,
+          error: callback.searchParams.get('error_description') ?? oauthError,
+          completedAt: Date.now(),
+        },
+      });
+      await chrome.storage.local.remove(GOOGLE_DRIVE_AUTH_TAB_KEY);
+      return;
+    }
+
+    const response = await fetch(GOOGLE_DRIVE_STATUS_URL, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Google Drive status request failed (${response.status}).`);
+    const status = await response.json() as { connected?: boolean };
+    if (!status.connected) throw new Error('Google authorization finished, but Drive is not connected yet.');
+
+    await chrome.storage.local.set({
+      [GOOGLE_DRIVE_AUTH_RESULT_KEY]: { connected: true, completedAt: Date.now() },
+    });
+    await chrome.storage.local.remove(GOOGLE_DRIVE_AUTH_TAB_KEY);
+    await chrome.tabs.remove(tabId).catch(() => undefined);
+  } catch (error) {
+    try {
+      const latest = await chrome.storage.local.get(GOOGLE_DRIVE_AUTH_TAB_KEY);
+      const pending = latest[GOOGLE_DRIVE_AUTH_TAB_KEY] as { tabId?: number } | undefined;
+      // Only clean up this attempt. A newer sign-in may have replaced it while
+      // the callback status request was in flight.
+      if (pending?.tabId === tabId) {
+        await chrome.storage.local.remove(GOOGLE_DRIVE_AUTH_TAB_KEY);
+        await chrome.storage.local.set({
+          [GOOGLE_DRIVE_AUTH_RESULT_KEY]: {
+            connected: false,
+            error: error instanceof Error ? error.message : 'Could not finish Google Drive authorization.',
+            completedAt: Date.now(),
+          },
+        });
+      }
+    } catch {
+      // Authorization UI failures should not disrupt meeting capture.
+    }
+  } finally {
+    processingDriveOAuthTabs.delete(tabId);
+  }
+}
+
+async function handleGoogleDriveOAuthTabClosed(tabId: number) {
+  try {
+    const stored = await chrome.storage.local.get(GOOGLE_DRIVE_AUTH_TAB_KEY);
+    const pending = stored[GOOGLE_DRIVE_AUTH_TAB_KEY] as { tabId?: number } | undefined;
+    if (pending?.tabId !== tabId) return;
+    await chrome.storage.local.remove(GOOGLE_DRIVE_AUTH_TAB_KEY);
+    await chrome.storage.local.set({
+      [GOOGLE_DRIVE_AUTH_RESULT_KEY]: {
+        connected: false,
+        error: 'The Google sign-in tab was closed before Drive connected. You can try again.',
+        completedAt: Date.now(),
+      },
+    });
+  } catch {
+    // A tab closing should never disrupt meeting capture or other extension state.
+  }
+}
+
+chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
+  if (change.status === 'complete' && tab.url) {
+    void handleGoogleDriveOAuthNavigation(tabId, tab.url);
+  }
 });
 
 async function broadcastPanelVisibility(info: { tabId?: number; windowId: number }, visible: boolean) {

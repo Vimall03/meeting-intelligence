@@ -1,5 +1,5 @@
 import { AUDIO_MIME_TYPE, AUDIO_WINDOW_MS, MEETING_SOCKET_URL } from '../lib/config';
-import type { JevAction } from '../lib/types';
+import type { JevAction, RelatedDriveFile } from '../lib/types';
 
 let recorder: MediaRecorder | undefined;
 let tabStream: MediaStream | undefined;
@@ -112,7 +112,22 @@ async function start(streamId: string) {
   sessionSocket.onmessage = (event) => {
     if (socket !== sessionSocket || stopping || typeof event.data !== 'string') return;
     try {
-      const message = JSON.parse(event.data) as { type?: string; decision?: string; confidence?: number };
+      const message = JSON.parse(event.data) as {
+        type?: string;
+        decision?: string;
+        confidence?: number;
+        query?: string;
+        files?: RelatedDriveFile[];
+        error?: string;
+      };
+      if (message.type === 'RELATED_FILES' && Array.isArray(message.files)) {
+        notify({
+          relatedFiles: message.files.filter(isRelatedDriveFile),
+          relatedFilesQuery: message.query ?? '',
+          relatedFilesError: message.error,
+        });
+        return;
+      }
       const actionable = message.decision === 'SEARCH_EXISTING_WORK' || message.decision === 'SUGGEST_NEW_TASK';
       if (message.type !== 'jev_decision' || !actionable || typeof message.confidence !== 'number') return;
       notify({
@@ -163,7 +178,17 @@ async function start(streamId: string) {
     void stop();
   };
   startRecordingWindow(activeRecorder);
-  notify({ captureStatus: 'connecting', backendConnected: false, jevDecision: undefined, error: undefined });
+  notify({ captureStatus: 'connecting', backendConnected: false, jevDecision: undefined, relatedFiles: undefined, relatedFilesQuery: undefined, relatedFilesError: undefined, error: undefined });
+}
+
+function isRelatedDriveFile(value: unknown): value is RelatedDriveFile {
+  if (!value || typeof value !== 'object') return false;
+  const file = value as Partial<RelatedDriveFile>;
+  return typeof file.id === 'string'
+    && typeof file.name === 'string'
+    && typeof file.mime_type === 'string'
+    && Array.isArray(file.matched_terms)
+    && typeof file.relevance_score === 'number';
 }
 
 async function stop() {

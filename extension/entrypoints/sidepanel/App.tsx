@@ -1,10 +1,34 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ExtensionMessage, ExtensionState, MeetingStatus } from '../../lib/types';
 import { MICROPHONE_PERMISSION_KEY } from '../../lib/microphone-permission';
+import {
+  GOOGLE_DRIVE_AUTH_RESULT_KEY,
+  GOOGLE_DRIVE_AUTH_START_URL,
+  GOOGLE_DRIVE_AUTH_TAB_KEY,
+  GOOGLE_DRIVE_STATUS_URL,
+} from '../../lib/config';
 import './style.css';
 
 type MicrophonePermission = 'checking' | 'prompt' | 'granted' | 'denied' | 'requesting';
+type GoogleDriveConnection = 'checking' | 'connected' | 'disconnected' | 'error';
 type Notice = { tone: 'error' | 'success' | 'info'; text: string };
+
+async function readGoogleDriveStatus(): Promise<boolean> {
+  let response: Response;
+  try {
+    response = await fetch(GOOGLE_DRIVE_STATUS_URL, { cache: 'no-store' });
+  } catch {
+    throw new Error('Could not reach the local backend. Make sure it is running, then retry.');
+  }
+  const payload = await response.json().catch(() => ({})) as {
+    connected?: boolean;
+    detail?: { message?: string };
+  };
+  if (!response.ok) {
+    throw new Error(payload.detail?.message ?? `Google Drive status failed (${response.status}).`);
+  }
+  return payload.connected === true;
+}
 
 const initialState: ExtensionState = {
   meetingStatus: 'unknown',
@@ -18,6 +42,33 @@ function isMeetTab(tab: chrome.tabs.Tab | undefined) {
   } catch {
     return false;
   }
+}
+
+function googleDriveFileUrl(file: { id: string; web_view_link?: string }) {
+  const fallback = `https://drive.google.com/open?id=${encodeURIComponent(file.id)}`;
+  try {
+    const url = new URL(file.web_view_link || fallback);
+    if (url.protocol === 'https:' && (url.hostname === 'drive.google.com' || url.hostname.endsWith('.google.com'))) {
+      return url.toString();
+    }
+  } catch {
+    // Fall back to Google's standard file URL for missing or malformed links.
+  }
+  return fallback;
+}
+
+function driveFileType(mimeType: string) {
+  const nativeTypes: Record<string, string> = {
+    'application/vnd.google-apps.document': 'Google Docs',
+    'application/vnd.google-apps.spreadsheet': 'Google Sheets',
+    'application/vnd.google-apps.presentation': 'Google Slides',
+  };
+  if (nativeTypes[mimeType]) return nativeTypes[mimeType];
+  if (mimeType === 'application/pdf') return 'PDF';
+  if (mimeType.startsWith('image/')) return 'Image';
+  if (mimeType.startsWith('video/')) return 'Video';
+  if (mimeType.startsWith('audio/')) return 'Audio';
+  return mimeType.split('/').at(-1)?.replaceAll('-', ' ') || 'File';
 }
 
 async function readMicrophonePermission(): Promise<PermissionState | undefined> {
@@ -38,6 +89,10 @@ export default function App() {
   const [state, setState] = useState(initialState);
   const [activeTab, setActiveTab] = useState<chrome.tabs.Tab>();
   const [microphone, setMicrophone] = useState<MicrophonePermission>('checking');
+  const [googleDriveConnection, setGoogleDriveConnection] = useState<GoogleDriveConnection>('checking');
+  const [googleDriveAuthorizing, setGoogleDriveAuthorizing] = useState(false);
+  const [googleDriveBusy, setGoogleDriveBusy] = useState(false);
+  const [googleDriveError, setGoogleDriveError] = useState<string>();
   const [notice, setNotice] = useState<Notice>();
   const [busy, setBusy] = useState(false);
   const [readyTabId, setReadyTabId] = useState<number>();
@@ -96,6 +151,22 @@ export default function App() {
     }
   }, []);
 
+  const syncGoogleDriveStatus = useCallback(async () => {
+    try {
+      const connected = await readGoogleDriveStatus();
+      setGoogleDriveConnection(connected ? 'connected' : 'disconnected');
+      setGoogleDriveError(undefined);
+      if (connected) {
+        setGoogleDriveAuthorizing(false);
+      }
+      return connected;
+    } catch (error) {
+      setGoogleDriveConnection('error');
+      setGoogleDriveError(error instanceof Error ? error.message : 'Could not check Google Drive connection.');
+      return false;
+    }
+  }, []);
+
   useEffect(() => {
     const updateFromBroadcast = (next: ExtensionState) => {
       setState((previous) => ({
@@ -125,19 +196,33 @@ export default function App() {
         const granted = changes[MICROPHONE_PERMISSION_KEY]?.newValue === true;
         setMicrophone((current) => granted ? 'granted' : current === 'denied' ? 'denied' : 'prompt');
       }
+      if (areaName === 'local' && changes[GOOGLE_DRIVE_AUTH_RESULT_KEY]?.newValue) {
+        const result = changes[GOOGLE_DRIVE_AUTH_RESULT_KEY].newValue as { connected?: boolean; error?: string };
+        if (result.connected) {
+          setGoogleDriveConnection('connected');
+          setGoogleDriveAuthorizing(false);
+          setGoogleDriveError(undefined);
+        } else if (result.error) {
+          setGoogleDriveConnection('disconnected');
+          setGoogleDriveAuthorizing(false);
+          setGoogleDriveError(result.error);
+        }
+        void chrome.storage.local.remove(GOOGLE_DRIVE_AUTH_RESULT_KEY);
+      }
     };
     const onActivated = () => { void refresh(); };
     const onUpdated: Parameters<typeof chrome.tabs.onUpdated.addListener>[0] = (tabId, change, tab) => {
       if (change.status === 'complete' && tab.active && tabId === activeTabId.current) void refresh();
     };
     const onRemoved = (tabId: number) => {
-      if (tabId !== microphoneRequestTabId.current) return;
-      microphoneRequestTabId.current = undefined;
-      void readMicrophonePermission().then((permission) => {
-        if (permission === undefined) return;
-        setMicrophone(permission === 'granted' ? 'granted' : permission === 'denied' ? 'denied' : 'prompt');
-        void chrome.storage.local.set({ [MICROPHONE_PERMISSION_KEY]: permission === 'granted' });
-      });
+      if (tabId === microphoneRequestTabId.current) {
+        microphoneRequestTabId.current = undefined;
+        void readMicrophonePermission().then((permission) => {
+          if (permission === undefined) return;
+          setMicrophone(permission === 'granted' ? 'granted' : permission === 'denied' ? 'denied' : 'prompt');
+          void chrome.storage.local.set({ [MICROPHONE_PERMISSION_KEY]: permission === 'granted' });
+        });
+      }
     };
 
     chrome.runtime.onMessage.addListener(onMessage);
@@ -160,7 +245,32 @@ export default function App() {
         chrome.tabs.sendMessage(tabId, { type: 'PANEL_VISIBILITY', visible: false, tabId }).catch(() => undefined);
       }
     };
-  }, [refresh]);
+  }, [refresh, syncGoogleDriveStatus]);
+
+  useEffect(() => {
+    let mounted = true;
+    void (async () => {
+      const connected = await syncGoogleDriveStatus();
+      const stored = await chrome.storage.local.get(GOOGLE_DRIVE_AUTH_RESULT_KEY);
+      const result = stored[GOOGLE_DRIVE_AUTH_RESULT_KEY] as { connected?: boolean; error?: string; completedAt?: number } | undefined;
+      if (!mounted || !result) return;
+      const recent = typeof result.completedAt === 'number' && Date.now() - result.completedAt < 2 * 60 * 1000;
+      if (!connected && recent && result.error) {
+        setGoogleDriveError(result.error);
+        setGoogleDriveConnection('disconnected');
+      }
+      await chrome.storage.local.remove(GOOGLE_DRIVE_AUTH_RESULT_KEY);
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [syncGoogleDriveStatus]);
+
+  useEffect(() => {
+    if (!googleDriveAuthorizing) return;
+    const poll = window.setInterval(() => { void syncGoogleDriveStatus(); }, 1_500);
+    return () => window.clearInterval(poll);
+  }, [googleDriveAuthorizing, syncGoogleDriveStatus]);
 
   useEffect(() => {
     let permissionStatus: PermissionStatus | undefined;
@@ -232,6 +342,59 @@ export default function App() {
       setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'Could not open Brave’s microphone permission prompt.' });
     } finally {
       setBusy(false);
+    }
+  };
+
+  const connectGoogleDrive = async () => {
+    setGoogleDriveBusy(true);
+    setGoogleDriveAuthorizing(true);
+    setGoogleDriveError(undefined);
+    try {
+      let response: Response;
+      try {
+        response = await fetch(GOOGLE_DRIVE_AUTH_START_URL, { cache: 'no-store' });
+      } catch {
+        throw new Error('Could not reach the local backend. Make sure it is running, then retry.');
+      }
+      const payload = await response.json().catch(() => ({})) as {
+        connected?: boolean;
+        authorization_url?: string | null;
+        redirect_uri?: string;
+        detail?: { message?: string };
+      };
+      if (!response.ok) {
+        throw new Error(payload.detail?.message ?? `Google Drive setup failed (${response.status}).`);
+      }
+      if (payload.connected || !payload.authorization_url) {
+        setGoogleDriveConnection('connected');
+        setGoogleDriveAuthorizing(false);
+        return;
+      }
+      if (!payload.redirect_uri) throw new Error('The backend did not provide a Google OAuth callback URL.');
+
+      const authUrl = new URL(payload.authorization_url);
+      const callbackUrl = new URL(payload.redirect_uri);
+      if (authUrl.origin !== 'https://accounts.google.com') {
+        throw new Error('The backend returned an unexpected Google sign-in address.');
+      }
+      if (!['http:', 'https:'].includes(callbackUrl.protocol)) {
+        throw new Error('The Google OAuth callback URL is invalid.');
+      }
+
+      const tab = await chrome.tabs.create({ url: authUrl.toString(), active: true });
+      if (tab.id === undefined) throw new Error('Could not open the Google sign-in tab.');
+      await chrome.storage.local.set({
+        [GOOGLE_DRIVE_AUTH_TAB_KEY]: {
+          tabId: tab.id,
+          redirectUri: callbackUrl.toString(),
+        },
+      });
+    } catch (error) {
+      setGoogleDriveAuthorizing(false);
+      setGoogleDriveConnection('error');
+      setGoogleDriveError(error instanceof Error ? error.message : 'Could not start Google Drive sign-in.');
+    } finally {
+      setGoogleDriveBusy(false);
     }
   };
 
@@ -350,6 +513,67 @@ export default function App() {
           <span>{Math.round(state.jevDecision.confidence * 100)}% confidence</span>
         </section>
       )}
+
+      {state.relatedFiles !== undefined && (
+        <section className="related-files-card" aria-live="polite">
+          <div className="related-files-heading">
+            <div>
+              <h2>Relevant files</h2>
+              {state.relatedFilesQuery && <p>{state.relatedFilesQuery}</p>}
+            </div>
+            <span aria-hidden="true">↗</span>
+          </div>
+          {state.relatedFiles.length > 0 && (
+            <ul className="related-files-list">
+              {state.relatedFiles.map((file) => (
+                <li key={file.id}>
+                  <div className="related-file-copy">
+                    <strong title={file.name}>{file.name}</strong>
+                    <span>{driveFileType(file.mime_type)}</span>
+                  </div>
+                  <a
+                    href={googleDriveFileUrl(file)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >Open</a>
+                </li>
+              ))}
+            </ul>
+          )}
+          {state.relatedFilesError && <p className="related-files-empty error-text">{state.relatedFilesError}</p>}
+          {!state.relatedFilesError && state.relatedFiles.length === 0 && <p className="related-files-empty">No relevant files found for this discussion yet.</p>}
+        </section>
+      )}
+
+      <section className="section-card drive-card" aria-live="polite">
+        <div className="drive-card-topline">
+          <div className="section-heading">
+            <span className={`drive-icon ${googleDriveConnection === 'connected' ? 'enabled' : ''}`} aria-hidden="true">G</span>
+            <div>
+              <h2>Google Drive</h2>
+              <p>{googleDriveConnection === 'connected'
+                ? 'Connected for related file search'
+                : googleDriveAuthorizing ? 'Finish sign-in in the Google tab'
+                  : googleDriveConnection === 'checking' ? 'Checking connection…'
+                    : 'Connect once to find files mentioned in meetings'}</p>
+            </div>
+          </div>
+          {googleDriveConnection === 'connected' && <span className="drive-connected-badge">Connected</span>}
+        </div>
+        {googleDriveError && <p className="drive-error" role="status">{googleDriveError}</p>}
+        {googleDriveConnection !== 'connected' && (
+          <button
+            className="drive-connect-button"
+            onClick={() => googleDriveConnection === 'error' ? void syncGoogleDriveStatus() : void connectGoogleDrive()}
+            disabled={googleDriveBusy || googleDriveAuthorizing || googleDriveConnection === 'checking'}
+          >
+            {googleDriveConnection === 'checking' ? 'Checking…'
+              : googleDriveBusy ? 'Opening Google sign-in…'
+                : googleDriveAuthorizing ? 'Waiting for Google sign-in…'
+                  : googleDriveConnection === 'error' ? 'Retry connection check' : 'Connect Google Drive'}
+          </button>
+        )}
+      </section>
 
       <section className="section-card">
         <div className="section-heading">

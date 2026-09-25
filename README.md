@@ -21,3 +21,32 @@ Jev receives the latest 45 seconds as `recent_context` and only transcript text
 added since its previous successful evaluation as `new_context`. `NONE` is kept
 server-side; `SEARCH_EXISTING_WORK` and `SUGGEST_NEW_TASK` are sent to the
 extension side panel.
+
+## Google Drive backend integration
+
+The backend owns the Google Drive OAuth flow and stores the refresh token in
+`backend/.data/google_drive_token.json` by default. The extension only needs to
+start authorization once; access-token refreshes happen server-side.
+
+Configure the values in `backend/app/.env` from
+`backend/app/.env.example`, then start the backend. The extension-facing HTTP
+endpoints are:
+
+```text
+GET  /api/integrations/google-drive/status
+GET  /api/integrations/google-drive/auth/start
+GET  /api/integrations/google-drive/oauth/callback
+GET  /api/integrations/google-drive/files/search?query=...
+GET  /api/integrations/google-drive/files/{file_id}
+POST /api/integrations/google-drive/disconnect
+```
+
+The live meeting search path calls `GoogleDriveService` directly after Gemma
+extracts structured search terms. Search results are ranked, limited to the top
+five files, and sent to the extension over the meeting WebSocket as a
+`RELATED_FILES` event.
+
+In the extension side panel, choose **Connect Google Drive** once and approve
+the Google consent screen. The backend keeps the refresh token; the extension
+does not store Google credentials. During capture, matching files appear under
+**Relevant files** with links that open in Google Drive.
