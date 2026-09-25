@@ -20,6 +20,10 @@ router = APIRouter()
 logger = logging.getLogger("uvicorn.error")
 
 
+def _format_cost(cost: float | None) -> str:
+    return f"${cost:.5f}" if cost is not None else "n/a"
+
+
 def write_audio_snapshot(audio: bytes) -> str:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as audio_file:
         audio_file.write(audio)
@@ -83,6 +87,7 @@ async def meeting_stream(websocket: WebSocket):
         dedupe_window_seconds=settings.jev_dedup_window_seconds,
     )
     jev_task: asyncio.Task[tuple[JevDecision, str]] | None = None
+    jev_started_at: float | None = None
     jev_evaluation_requested = False
     llm_tasks: list[tuple[asyncio.Task[LlmResult], float]] = []
     if jev is None:
@@ -114,13 +119,13 @@ async def meeting_stream(websocket: WebSocket):
             if transcription_task and transcription_task.done():
                 completed_task = transcription_task
                 transcription_task = None
+                latency = now - transcription_started_at if transcription_started_at else 0.0
                 try:
                     transcript = completed_task.result()
                 except Exception:
-                    logger.exception("Transcription failed")
+                    logger.exception("[STT] failed after %.2fs", latency)
                 else:
-                    elapsed = time.monotonic() - transcription_started_at if transcription_started_at else 0
-                    logger.info("Transcription completed in %.1f seconds", elapsed)
+                    window_start = transcribed_audio_end
                     new_segments = [
                         {
                             **segment,
@@ -130,22 +135,19 @@ async def meeting_stream(websocket: WebSocket):
                         for segment in transcript["segments"]
                     ]
                     transcribed_audio_end += transcript["audio_duration"]
+                    logger.info(
+                        "[STT] window=%.1fs-%.1fs latency=%.2fs segments=%d",
+                        window_start,
+                        transcribed_audio_end,
+                        latency,
+                        len(new_segments),
+                    )
                     if new_segments:
                         accepted_segments = meeting_context.add_segments(new_segments)
                         for segment in accepted_segments:
-                            logger.debug(
-                                "%s: %s",
-                                segment.speaker,
-                                segment.text,
-                            )
+                            logger.debug("%s: %s", segment.speaker, segment.text)
                         if accepted_segments:
                             jev_evaluation_requested = True
-                            logger.info(
-                                "Meeting context updated (%d new segment%s):\n%s",
-                                len(accepted_segments),
-                                "s" if len(accepted_segments) != 1 else "",
-                                meeting_context.as_text(),
-                            )
                             new_text = " ".join(
                                 segment.text for segment in accepted_segments
                             )
@@ -156,8 +158,6 @@ async def meeting_stream(websocket: WebSocket):
                                     now=now,
                                 )
                             )
-                    elif not transcript["segments"]:
-                        logger.info("No speech detected in the audio snapshot")
 
             if (
                 transcription_task is None
@@ -165,12 +165,6 @@ async def meeting_stream(websocket: WebSocket):
             ):
                 transcription_started_at = now
                 audio_window = pending_audio_windows.popleft()
-                logger.info(
-                    "Transcribing audio window at %.1f seconds (%d bytes, %d queued)",
-                    transcribed_audio_end,
-                    len(audio_window),
-                    len(pending_audio_windows),
-                )
                 transcription_task = asyncio.create_task(
                     transcribe_snapshot(audio_window)
                 )
@@ -178,10 +172,11 @@ async def meeting_stream(websocket: WebSocket):
             if jev_task and jev_task.done():
                 completed_jev_task = jev_task
                 jev_task = None
+                jev_latency = now - jev_started_at if jev_started_at else 0.0
                 try:
                     decision, evaluated_new_context = completed_jev_task.result()
                 except Exception:
-                    logger.exception("Jev routing failed")
+                    logger.exception("[JEV] failed after %.2fs", jev_latency)
                 else:
                     events = event_service.start_pending(
                         decision,
@@ -191,17 +186,13 @@ async def meeting_stream(websocket: WebSocket):
                     )
                     await dispatch_events(events)
                     logger.info(
-                        "JEV evaluation\n\nNEW:\n%s\n\n"
-                        "SEARCH_EXISTING_WORK: %.2f\nSUGGEST_NEW_TASK:     %.2f\n\n"
-                        "Pending enrichment:\n%s\n"
-                        "Finalized:\n%s\n"
-                        "Cost: %s",
-                        evaluated_new_context,
+                        "[JEV] latency=%.2fs search=%.2f task=%.2f pending=%s finalized=%s cost=%s",
+                        jev_latency,
                         decision.search_existing_work_probability,
                         decision.suggest_new_task_probability,
-                        "\n".join(event_service.pending_types()) or "none",
-                        "\n".join(event.type for event in events) if events else "none",
-                        f"${decision.cost:.8f}" if decision.cost is not None else "unknown",
+                        ",".join(event_service.pending_types()) or "-",
+                        ",".join(event.type for event in events) or "-",
+                        _format_cost(decision.cost),
                     )
 
             timed_out_events = event_service.check_timeouts(
@@ -219,16 +210,14 @@ async def meeting_stream(websocket: WebSocket):
                     try:
                         result = task.result()
                     except Exception:
-                        logger.exception(
-                            "Gemma call failed after %.1f seconds", latency
-                        )
+                        logger.exception("[LLM] failed after %.2fs", latency)
                         continue
                     logger.info(
-                        "Gemma result for %s in %.1f seconds: %s (cost: %s)",
+                        "[LLM] event=%s latency=%.2fs cost=%s data=%s",
                         result.event_type,
                         latency,
+                        _format_cost(result.cost),
                         result.data,
-                        f"${result.cost:.8f}" if result.cost is not None else "unknown",
                     )
                     await websocket.send_json(
                         {
@@ -246,6 +235,7 @@ async def meeting_stream(websocket: WebSocket):
                 and meeting_context.prepare_jev_context() is not None
             ):
                 jev_evaluation_requested = False
+                jev_started_at = now
                 jev_task = asyncio.create_task(
                     evaluate_new_context(meeting_context, jev)
                 )
