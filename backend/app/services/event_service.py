@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -13,6 +16,34 @@ EventType = Literal["SEARCH_EXISTING_WORK", "SUGGEST_NEW_TASK"]
 SILENCE_FINALIZE_SECONDS = 1.5
 WORD_COUNT_FINALIZE_THRESHOLD = 10
 HARD_CAP_SECONDS = 4.0
+# When the text trails off ("I think it was something"), wait for roughly one
+# more ~3s STT chunk before finalizing.
+INCOMPLETE_SILENCE_SECONDS = 4.0
+INCOMPLETE_HARD_CAP_SECONDS = 6.0
+
+# After a search fires, its topic stays open briefly so a stronger clue said a
+# moment later (e.g. the actual document title) can refine the query.
+SEARCH_SESSION_SECONDS = 20.0
+MIN_REFINEMENT_INTERVAL_SECONDS = 2.5
+MAX_REFINEMENTS_PER_SESSION = 2
+
+_INCOMPLETE_TRAILING_WORDS = frozenset(
+    {
+        "a", "about", "an", "and", "around", "as", "because", "but", "called",
+        "for", "from", "in", "is", "it's", "like", "maybe", "named", "of", "on",
+        "or", "related", "something", "that", "the", "think", "titled", "to",
+        "uh", "um", "was", "where", "which", "with",
+    }
+)
+_TICKET_KEY_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
+_RETRIEVAL_CUE_PATTERN = re.compile(
+    r"[\"“][^\"”]+[\"”]"
+    r"|\b(?:called|named|titled)\b"
+    r"|\bsomething\s+(?:around|like|about|along)\b",
+    re.IGNORECASE,
+)
+_JEV_LOG_TAG = "\033[33m[MEETING][JEV]\033[0m"
+logger = logging.getLogger("uvicorn.error")
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +55,8 @@ class MeetingEvent:
     triggered_at: float
     recent_context: str
     triggering_context: str
+    is_refinement: bool = False
+    previous_search_terms: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -34,16 +67,53 @@ class _PendingEvent:
     last_update_at: float
     text_parts: list[str] = field(default_factory=list)
     new_word_count: int = 0
+    is_refinement: bool = False
+
+
+@dataclass(slots=True)
+class _SearchSession:
+    score: float
+    last_search_at: float
+    last_text: str
+    refinements: int = 0
+    searched_terms: list[str] = field(default_factory=list)
 
 
 def _ends_sentence(text: str) -> bool:
     return text.rstrip().endswith((".", "?", "!"))
 
 
+def _ends_incomplete(text: str) -> bool:
+    stripped = text.rstrip()
+    if not stripped or _ends_sentence(stripped):
+        return False
+    if stripped.endswith((",", ":", "-")):
+        return True
+    last_word = stripped.split()[-1].strip("\"'“”").casefold()
+    return last_word in _INCOMPLETE_TRAILING_WORDS
+
+
+def _count_retrieval_clues(text: str) -> int:
+    return len(_TICKET_KEY_PATTERN.findall(text)) + len(
+        _RETRIEVAL_CUE_PATTERN.findall(text)
+    )
+
+
+def _adds_retrieval_clue(previous_text: str, new_text: str) -> bool:
+    # Joined with the previous chunk so cues split across chunks
+    # ("it was something" / "around cost comparison") are still seen.
+    joined = f"{previous_text} {new_text}"
+    return _count_retrieval_clues(joined) > _count_retrieval_clues(previous_text)
+
+
 class EventService:
     """Thresholds + dedupes Jev decisions, then buffers a short enrichment
     window before finalizing so Gemma is called once per event with a
-    complete-enough thought instead of on every Jev evaluation."""
+    complete-enough thought instead of on every Jev evaluation.
+
+    A finalized search opens a short-lived search session: while it is
+    active, later Jev crossings or explicit retrieval clues produce a limited
+    number of refinement events instead of being deduped away."""
 
     def __init__(
         self,
@@ -58,9 +128,71 @@ class EventService:
         self._dedupe_window_seconds = dedupe_window_seconds
         self._last_emitted_at: dict[EventType, float] = {}
         self._pending: dict[EventType, _PendingEvent] = {}
+        self._search_session: _SearchSession | None = None
+        self._recent_search_topics: list[tuple[float, frozenset[str]]] = []
+        self.last_search_terms_suppression_reason: str | None = None
 
     def pending_types(self) -> list[EventType]:
         return list(self._pending)
+
+    def accept_search_terms(
+        self,
+        primary_terms: Sequence[str],
+        all_terms: Sequence[str],
+        is_refinement: bool,
+        now: float,
+    ) -> bool:
+        """Record terms from Gemma and say whether they merit a Drive search.
+        Refinements only search when they add a new primary term."""
+        self.last_search_terms_suppression_reason = None
+        self._recent_search_topics[:] = [
+            (searched_at, topic)
+            for searched_at, topic in self._recent_search_topics
+            if now - searched_at < self._dedupe_window_seconds
+        ]
+        topic = frozenset(
+            re.findall(r"[a-z0-9]+", " ".join(primary_terms).casefold())
+        )
+        if topic:
+            for _, previous_topic in self._recent_search_topics:
+                shared_terms = topic & previous_topic
+                smaller_topic_size = min(len(topic), len(previous_topic))
+                if topic == previous_topic or (
+                    len(shared_terms) >= 2
+                    and len(shared_terms) / smaller_topic_size >= 0.8
+                ):
+                    self.last_search_terms_suppression_reason = "duplicate_search_topic"
+                    return False
+
+        session = self._active_search_session(now)
+        if session is None:
+            if topic:
+                self._recent_search_topics.append((now, topic))
+            return True
+        known = {term.casefold() for term in session.searched_terms}
+        if is_refinement and all(term.casefold() in known for term in primary_terms):
+            self.last_search_terms_suppression_reason = "duplicate_search_topic"
+            return False
+        for term in all_terms:
+            if term.casefold() not in known:
+                known.add(term.casefold())
+                session.searched_terms.append(term)
+        if topic:
+            self._recent_search_topics.append((now, topic))
+        return True
+
+    def _active_search_session(self, now: float) -> _SearchSession | None:
+        session = self._search_session
+        if session is None or now - session.last_search_at >= SEARCH_SESSION_SECONDS:
+            return None
+        return session
+
+    @staticmethod
+    def _can_refine(session: _SearchSession, now: float) -> bool:
+        return (
+            session.refinements < MAX_REFINEMENTS_PER_SESSION
+            and now - session.last_search_at >= MIN_REFINEMENT_INTERVAL_SECONDS
+        )
 
     def start_pending(
         self,
@@ -80,13 +212,50 @@ class EventService:
             if probability < self._thresholds[event_type]:
                 continue
             if event_type in self._pending:
+                logger.info(
+                    "%s action suppressed action=%s confidence=%.2f reason=event_already_pending",
+                    _JEV_LOG_TAG,
+                    event_type,
+                    probability,
+                )
                 continue
-            last_emitted_at = self._last_emitted_at.get(event_type)
-            if (
-                last_emitted_at is not None
-                and now - last_emitted_at < self._dedupe_window_seconds
-            ):
-                continue
+            is_refinement = False
+            session = (
+                self._active_search_session(now)
+                if event_type == "SEARCH_EXISTING_WORK"
+                else None
+            )
+            if session is not None:
+                if not self._can_refine(session, now):
+                    if session.refinements < MAX_REFINEMENTS_PER_SESSION:
+                        logger.info(
+                            "%s action suppressed action=%s confidence=%.2f reason=refinement_cooldown",
+                            _JEV_LOG_TAG,
+                            event_type,
+                            probability,
+                        )
+                        continue
+                    logger.info(
+                        "%s new intent action=%s confidence=%.2f reason=refinement_limit_reached",
+                        _JEV_LOG_TAG,
+                        event_type,
+                        probability,
+                    )
+                else:
+                    is_refinement = True
+            elif event_type != "SEARCH_EXISTING_WORK":
+                last_emitted_at = self._last_emitted_at.get(event_type)
+                if (
+                    last_emitted_at is not None
+                    and now - last_emitted_at < self._dedupe_window_seconds
+                ):
+                    logger.info(
+                        "%s action suppressed action=%s confidence=%.2f reason=event_type_dedupe_window",
+                        _JEV_LOG_TAG,
+                        event_type,
+                        probability,
+                    )
+                    continue
             self._pending[event_type] = _PendingEvent(
                 type=event_type,
                 score=probability,
@@ -94,6 +263,7 @@ class EventService:
                 last_update_at=now,
                 text_parts=[triggering_context],
                 new_word_count=len(triggering_context.split()),
+                is_refinement=is_refinement,
             )
         return self._finalize_ready(
             now, recent_context=recent_context, just_appended=triggering_context
@@ -102,13 +272,35 @@ class EventService:
     def enrich(
         self, new_text: str, recent_context: str, now: float
     ) -> list[MeetingEvent]:
-        """Feed newly transcribed text into any open enrichment windows."""
-        if not self._pending or not new_text.strip():
+        """Feed newly transcribed text into any open enrichment windows, and
+        open a refinement window if it adds a retrieval clue to an active
+        search session."""
+        if not new_text.strip():
             return []
         for pending in self._pending.values():
             pending.text_parts.append(new_text)
             pending.last_update_at = now
             pending.new_word_count += len(new_text.split())
+        session = self._active_search_session(now)
+        if session is not None:
+            if (
+                "SEARCH_EXISTING_WORK" not in self._pending
+                and self._can_refine(session, now)
+                and _adds_retrieval_clue(session.last_text, new_text)
+            ):
+                text_parts = [session.last_text, new_text]
+                self._pending["SEARCH_EXISTING_WORK"] = _PendingEvent(
+                    type="SEARCH_EXISTING_WORK",
+                    score=session.score,
+                    started_at=now,
+                    last_update_at=now,
+                    text_parts=text_parts,
+                    new_word_count=len(" ".join(text_parts).split()),
+                    is_refinement=True,
+                )
+            session.last_text = new_text
+        if not self._pending:
+            return []
         return self._finalize_ready(
             now, recent_context=recent_context, just_appended=new_text
         )
@@ -130,23 +322,46 @@ class EventService:
             pending = self._pending[event_type]
             silence_seconds = now - pending.last_update_at
             age_seconds = now - pending.started_at
-            should_finalize = (
-                silence_seconds >= SILENCE_FINALIZE_SECONDS
-                or pending.new_word_count >= WORD_COUNT_FINALIZE_THRESHOLD
-                or (just_appended is not None and _ends_sentence(just_appended))
-                or age_seconds >= HARD_CAP_SECONDS
-            )
+            triggering_context = " ".join(pending.text_parts)
+            if _ends_incomplete(triggering_context):
+                should_finalize = (
+                    silence_seconds >= INCOMPLETE_SILENCE_SECONDS
+                    or age_seconds >= INCOMPLETE_HARD_CAP_SECONDS
+                )
+            else:
+                should_finalize = (
+                    silence_seconds >= SILENCE_FINALIZE_SECONDS
+                    or pending.new_word_count >= WORD_COUNT_FINALIZE_THRESHOLD
+                    or (just_appended is not None and _ends_sentence(just_appended))
+                    or age_seconds >= HARD_CAP_SECONDS
+                )
             if not should_finalize:
                 continue
             del self._pending[event_type]
             self._last_emitted_at[event_type] = now
+            previous_search_terms: tuple[str, ...] = ()
+            if event_type == "SEARCH_EXISTING_WORK":
+                session = self._search_session
+                if pending.is_refinement and session is not None:
+                    session.refinements += 1
+                    session.last_search_at = now
+                    session.last_text = pending.text_parts[-1]
+                    previous_search_terms = tuple(session.searched_terms)
+                else:
+                    self._search_session = _SearchSession(
+                        score=pending.score,
+                        last_search_at=now,
+                        last_text=pending.text_parts[-1],
+                    )
             events.append(
                 MeetingEvent(
                     type=event_type,
                     score=pending.score,
                     triggered_at=now,
                     recent_context=recent_context,
-                    triggering_context=" ".join(pending.text_parts),
+                    triggering_context=triggering_context,
+                    is_refinement=pending.is_refinement,
+                    previous_search_terms=previous_search_terms,
                 )
             )
         return events

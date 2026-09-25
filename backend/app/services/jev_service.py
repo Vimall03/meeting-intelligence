@@ -44,15 +44,32 @@ class JevService:
                     "should_search_existing_work": {
                         "type": "noul",
                         "instructions": (
-                            "Based primarily on new_context, would it be useful right now "
-                            "to search for an existing work item related to what is being "
-                            "discussed? Use recent_context only to resolve references and "
-                            "understand context. Answer yes when the conversation indicates "
-                            "that the work already exists, was previously raised, is "
-                            "already being worked on, has a ticket/task/issue, has an "
-                            "identifier, or someone is discussing its status or completion. "
-                            "Do not answer yes merely because someone mentions a new "
-                            "problem."
+                            "Should the meeting assistant search Google Drive now for an "
+                            "existing file or work item that would help with this discussion? "
+                            "Use new_context as the current signal. Use recent_context to "
+                            "resolve references and identify the specific project, decision, "
+                            "or artifact being discussed; recent context alone is not a reason "
+                            "to search.\n\n"
+                            "Answer yes for either explicit OR implicit retrieval intent. "
+                            "Explicit examples: 'let's pull up the cost comparison document', "
+                            "'open the rollout deck', or 'find the migration plan'. Do not "
+                            "require the speaker to say 'search' or name Google Drive.\n\n"
+                            "Also answer yes proactively, without a retrieval command, when "
+                            "the conversation points to a specific existing deliverable or "
+                            "workstream whose file is likely useful now: for example, asking "
+                            "how last month's pricing analysis compared costs, discussing the "
+                            "decision in the launch plan, or returning to a named project and "
+                            "its prior proposal. Search should make relevant context ready "
+                            "before someone has to ask for the file.\n\n"
+                            "Existing material includes Docs, Sheets, Slides, PDFs, reports, "
+                            "proposals, plans, analyses, designs, budgets, and tracked "
+                            "tickets/tasks/issues. A new task can be suggested independently "
+                            "when new work is agreed.\n\n"
+                            "Answer no for generic conversation or brainstorming with no "
+                            "specific existing artifact/work item likely to help, a merely "
+                            "hypothetical reference, or a request only to create a new file "
+                            "with no useful existing source. Do not answer yes just because "
+                            "a problem or a common noun is mentioned."
                         ),
                     },
                     "should_suggest_new_task": {
@@ -63,7 +80,10 @@ class JevService:
                             "concrete new work that would be useful to capture as a new "
                             "task? Use recent_context to resolve references. Do not answer "
                             "yes if the conversation clearly indicates that this work "
-                            "already exists as a tracked ticket or task."
+                            "already exists as a tracked ticket or task. Do not classify "
+                            "requests to find, open, retrieve, search for, pull up, or "
+                            "show an existing file, ticket, or document as new work; "
+                            "those are retrieval actions, not new tasks."
                         ),
                     },
                 },

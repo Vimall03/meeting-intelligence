@@ -20,6 +20,11 @@ class JevServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(payload["questions"]["should_search_existing_work"]["type"], "noul")
             self.assertEqual(payload["questions"]["should_suggest_new_task"]["type"], "noul")
+            search_instructions = payload["questions"]["should_search_existing_work"]["instructions"]
+            self.assertIn("explicit OR implicit retrieval intent", search_instructions)
+            self.assertIn("let's pull up the cost comparison document", search_instructions)
+            self.assertIn("answer yes proactively", search_instructions)
+            self.assertIn("Answer no for generic conversation", search_instructions)
             return httpx.Response(
                 200,
                 json={

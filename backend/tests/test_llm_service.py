@@ -23,7 +23,8 @@ class LlmServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["model"], "google/gemma-4-26b-a4b-it")
             system_message = payload["messages"][0]
             self.assertEqual(system_message["role"], "system")
-            self.assertIn("search for an existing work item", system_message["content"])
+            self.assertIn("existing Google Drive files", system_message["content"])
+            self.assertIn("cost comparison", system_message["content"])
             user_message = json.loads(payload["messages"][1]["content"])
             self.assertEqual(
                 user_message["event"],
@@ -44,8 +45,9 @@ class LlmServiceTests(unittest.IsolatedAsyncioTestCase):
                                 "role": "assistant",
                                 "content": json.dumps(
                                     {
-                                        "search_query": "theme bug",
-                                        "referenced_entities": ["theme bug"],
+                                        "primary_terms": ["theme bug"],
+                                        "alternate_terms": ["theme issue"],
+                                        "entities": ["theme"],
                                     }
                                 ),
                             }
@@ -65,7 +67,9 @@ class LlmServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.close()
 
         self.assertEqual(result.event_type, "SEARCH_EXISTING_WORK")
-        self.assertEqual(result.data["search_query"], "theme bug")
+        self.assertEqual(result.data["primary_terms"], ["theme bug"])
+        self.assertEqual(result.data["alternate_terms"], ["theme issue"])
+        self.assertEqual(result.data["entities"], ["theme"])
         self.assertEqual(result.cost, 0.0002)
 
     async def test_uses_new_task_prompt_for_suggest_new_task_events(self) -> None:

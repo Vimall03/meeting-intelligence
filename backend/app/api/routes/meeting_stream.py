@@ -11,13 +11,28 @@ from fastapi.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.services.event_service import EventService, MeetingEvent
+from app.services.google_drive_service import (
+    GoogleDriveSearchTerms,
+    GoogleDriveService,
+)
 from app.services.jev_service import JevDecision, JevService
 from app.services.llm_service import LlmResult, LlmService
 from app.services.meeting_context_service import MeetingContextService
-from app.services.transcription_services import transcribe_realtime_chunk
+from app.services.openrouter_stt_service import transcribe_realtime_chunk
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn.error")
+_LOG_COLORS = {
+    "STT": "36",
+    "CONTEXT": "34",
+    "JEV": "33",
+    "LLM": "35",
+    "DRIVE": "32",
+}
+
+
+def _log_tag(stage: str) -> str:
+    return f"\033[{_LOG_COLORS[stage]}m[MEETING][{stage}]\033[0m"
 
 
 def _format_cost(cost: float | None) -> str:
@@ -55,6 +70,7 @@ async def evaluate_new_context(
 @router.websocket("/ws/meeting")
 async def meeting_stream(websocket: WebSocket):
     await websocket.accept()
+    google_drive: GoogleDriveService = websocket.app.state.google_drive
     pending_audio_windows: deque[bytes] = deque()
     transcribed_audio_end = 0.0
     meeting_context = MeetingContextService(
@@ -89,12 +105,22 @@ async def meeting_stream(websocket: WebSocket):
     jev_task: asyncio.Task[tuple[JevDecision, str]] | None = None
     jev_started_at: float | None = None
     jev_evaluation_requested = False
-    llm_tasks: list[tuple[asyncio.Task[LlmResult], float]] = []
+    llm_tasks: list[tuple[asyncio.Task[LlmResult], float, MeetingEvent]] = []
+    drive_tasks: list[tuple[asyncio.Task[dict], float, str]] = []
     if jev is None:
-        logger.warning("Jev routing disabled: OPENROUTER_API_KEY is not configured")
+        logger.warning(
+            "[MEETING][JEV] disabled reason=OPENROUTER_API_KEY_not_configured"
+        )
 
     async def dispatch_events(events: list[MeetingEvent]) -> None:
         for event in events:
+            logger.info(
+                "%s emitted action=%s confidence=%.2f refinement=%s",
+                _log_tag("JEV"),
+                event.type,
+                event.score,
+                event.is_refinement,
+            )
             await websocket.send_json(
                 {
                     "type": "jev_decision",
@@ -104,13 +130,17 @@ async def meeting_stream(websocket: WebSocket):
             )
             if llm is not None:
                 llm_tasks.append(
-                    (asyncio.create_task(llm.process_event(event)), time.monotonic())
+                    (
+                        asyncio.create_task(llm.process_event(event)),
+                        time.monotonic(),
+                        event,
+                    )
                 )
 
     try:
         while True:
             try:
-                data = await asyncio.wait_for(websocket.receive_bytes(), timeout=1)
+                data = await asyncio.wait_for(websocket.receive_bytes(), timeout=0.25)
                 pending_audio_windows.append(data)
             except asyncio.TimeoutError:
                 pass
@@ -122,8 +152,14 @@ async def meeting_stream(websocket: WebSocket):
                 latency = now - transcription_started_at if transcription_started_at else 0.0
                 try:
                     transcript = completed_task.result()
-                except Exception:
-                    logger.exception("[STT] failed after %.2fs", latency)
+                except Exception as error:
+                    logger.error(
+                        "%s failed latency=%.2fs error=%s: %s",
+                        _log_tag("STT"),
+                        latency,
+                        type(error).__name__,
+                        error,
+                    )
                 else:
                     window_start = transcribed_audio_end
                     new_segments = [
@@ -136,7 +172,8 @@ async def meeting_stream(websocket: WebSocket):
                     ]
                     transcribed_audio_end += transcript["audio_duration"]
                     logger.info(
-                        "[STT] window=%.1fs-%.1fs latency=%.2fs segments=%d",
+                        "%s window=%.1fs-%.1fs latency=%.2fs segments=%d",
+                        _log_tag("STT"),
                         window_start,
                         transcribed_audio_end,
                         latency,
@@ -144,12 +181,17 @@ async def meeting_stream(websocket: WebSocket):
                     )
                     if new_segments:
                         accepted_segments = meeting_context.add_segments(new_segments)
-                        for segment in accepted_segments:
-                            logger.debug("%s: %s", segment.speaker, segment.text)
                         if accepted_segments:
                             jev_evaluation_requested = True
                             new_text = " ".join(
                                 segment.text for segment in accepted_segments
+                            )
+                            logger.info(
+                                "%s active_context accepted_segments=%d text_chars=%d\n%s",
+                                _log_tag("CONTEXT"),
+                                len(accepted_segments),
+                                len(new_text),
+                                meeting_context.as_text(),
                             )
                             await dispatch_events(
                                 event_service.enrich(
@@ -175,8 +217,14 @@ async def meeting_stream(websocket: WebSocket):
                 jev_latency = now - jev_started_at if jev_started_at else 0.0
                 try:
                     decision, evaluated_new_context = completed_jev_task.result()
-                except Exception:
-                    logger.exception("[JEV] failed after %.2fs", jev_latency)
+                except Exception as error:
+                    logger.error(
+                        "%s failed latency=%.2fs error=%s: %s",
+                        _log_tag("JEV"),
+                        jev_latency,
+                        type(error).__name__,
+                        error,
+                    )
                 else:
                     events = event_service.start_pending(
                         decision,
@@ -186,7 +234,9 @@ async def meeting_stream(websocket: WebSocket):
                     )
                     await dispatch_events(events)
                     logger.info(
-                        "[JEV] latency=%.2fs search=%.2f task=%.2f pending=%s finalized=%s cost=%s",
+                        "%s decision latency=%.2fs search_existing=%.2f suggest_task=%.2f "
+                        "pending=%s finalized=%s cost=%s",
+                        _log_tag("JEV"),
                         jev_latency,
                         decision.search_existing_work_probability,
                         decision.suggest_new_task_probability,
@@ -201,24 +251,77 @@ async def meeting_stream(websocket: WebSocket):
             await dispatch_events(timed_out_events)
 
             if llm_tasks:
-                still_running: list[tuple[asyncio.Task[LlmResult], float]] = []
-                for task, started_at in llm_tasks:
+                still_running: list[
+                    tuple[asyncio.Task[LlmResult], float, MeetingEvent]
+                ] = []
+                for task, started_at, event in llm_tasks:
                     if not task.done():
-                        still_running.append((task, started_at))
+                        still_running.append((task, started_at, event))
                         continue
                     latency = now - started_at
                     try:
                         result = task.result()
-                    except Exception:
-                        logger.exception("[LLM] failed after %.2fs", latency)
+                    except Exception as error:
+                        logger.error(
+                            "%s failed latency=%.2fs error=%s: %s",
+                            _log_tag("LLM"),
+                            latency,
+                            type(error).__name__,
+                            error,
+                        )
                         continue
                     logger.info(
-                        "[LLM] event=%s latency=%.2fs cost=%s data=%s",
+                        "%s action=%s refinement=%s latency=%.2fs cost=%s data=%s",
+                        _log_tag("LLM"),
                         result.event_type,
+                        event.is_refinement,
                         latency,
                         _format_cost(result.cost),
                         result.data,
                     )
+                    if result.event_type == "SEARCH_EXISTING_WORK":
+                        search_terms = GoogleDriveSearchTerms.from_mapping(result.data)
+                        weighted_terms = [
+                            term for term, _ in search_terms.weighted_terms()
+                        ]
+                        if weighted_terms and not event_service.accept_search_terms(
+                            search_terms.primary_terms,
+                            weighted_terms,
+                            is_refinement=event.is_refinement,
+                            now=now,
+                        ):
+                            logger.info(
+                                "%s action suppressed action=SEARCH_EXISTING_WORK confidence=%.2f reason=%s",
+                                _log_tag("JEV"),
+                                event.score,
+                                event_service.last_search_terms_suppression_reason
+                                or "duplicate_search_topic",
+                            )
+                            logger.info(
+                                "%s skipped reason=no_new_primary_terms",
+                                _log_tag("DRIVE"),
+                            )
+                        elif weighted_terms:
+                            drive_started_at = time.perf_counter()
+                            logger.info(
+                                "%s request query=%r refinement=%s terms=%s",
+                                _log_tag("DRIVE"),
+                                search_terms.query,
+                                event.is_refinement,
+                                weighted_terms,
+                            )
+                            drive_tasks.append(
+                                (
+                                    asyncio.create_task(
+                                        google_drive.search_relevant_files(
+                                            search_terms,
+                                            top_k=5,
+                                        )
+                                    ),
+                                    drive_started_at,
+                                    search_terms.query,
+                                )
+                            )
                     await websocket.send_json(
                         {
                             "type": "llm_result",
@@ -228,17 +331,71 @@ async def meeting_stream(websocket: WebSocket):
                     )
                 llm_tasks = still_running
 
+            if drive_tasks:
+                still_running_drive: list[tuple[asyncio.Task[dict], float, str]] = []
+                for task, started_at, query in drive_tasks:
+                    if not task.done():
+                        still_running_drive.append((task, started_at, query))
+                        continue
+                    total_retrieval_seconds = time.perf_counter() - started_at
+                    try:
+                        retrieval = task.result()
+                    except Exception as error:
+                        logger.error(
+                            "%s failed latency=%.2fs error=%s: %s",
+                            _log_tag("DRIVE"),
+                            total_retrieval_seconds,
+                            type(error).__name__,
+                            error,
+                        )
+                        await websocket.send_json(
+                            {
+                                "type": "RELATED_FILES",
+                                "source": "google_drive",
+                                "query": query,
+                                "files": [],
+                                "error": str(error),
+                            }
+                        )
+                        continue
+
+                    logger.info(
+                        "%s response query=%r latency=%.2fs search=%.0fms rank=%.0fms files=%s",
+                        _log_tag("DRIVE"),
+                        retrieval["query"],
+                        total_retrieval_seconds,
+                        retrieval["search_latency_ms"],
+                        retrieval["ranking_latency_ms"],
+                        [file["name"] for file in retrieval["files"]],
+                    )
+                    await websocket.send_json(
+                        {
+                            "type": "RELATED_FILES",
+                            "source": "google_drive",
+                            "query": retrieval["query"],
+                            "files": retrieval["files"],
+                        }
+                    )
+                drive_tasks = still_running_drive
+
             if (
                 jev is not None
                 and jev_task is None
                 and jev_evaluation_requested
-                and meeting_context.prepare_jev_context() is not None
             ):
-                jev_evaluation_requested = False
-                jev_started_at = now
-                jev_task = asyncio.create_task(
-                    evaluate_new_context(meeting_context, jev)
-                )
+                jev_snapshot = meeting_context.prepare_jev_context()
+                if jev_snapshot is not None:
+                    jev_evaluation_requested = False
+                    jev_started_at = now
+                    logger.info(
+                        "%s request\n  recent context:\n%s\n  new context:\n%s",
+                        _log_tag("JEV"),
+                        jev_snapshot.recent_context or "(empty)",
+                        jev_snapshot.new_context,
+                    )
+                    jev_task = asyncio.create_task(
+                        evaluate_new_context(meeting_context, jev)
+                    )
     except WebSocketDisconnect:
         pass
     finally:
@@ -250,7 +407,11 @@ async def meeting_stream(websocket: WebSocket):
             jev_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await jev_task
-        for task, _ in llm_tasks:
+        for task, _, _ in llm_tasks:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        for task, _, _ in drive_tasks:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task

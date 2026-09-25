@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     meeting_context_window_seconds: float = 45.0
     meeting_context_turn_gap_seconds: float = 12.0
     openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
+    openrouter_stt_model: str = Field(
+        default="openai/gpt-transcribe", validation_alias="OPENROUTER_STT_MODEL"
+    )
+    openrouter_stt_url: str = Field(
+        default="https://openrouter.ai/api/v1/audio/transcriptions",
+        validation_alias="OPENROUTER_STT_URL",
+    )
     jev_model: str = "typesafe/jev-1.13"
     jev_decisions_url: str = "https://openrouter.ai/api/alpha/decisions"
     jev_search_threshold: float = 0.75
@@ -24,6 +31,29 @@ class Settings(BaseSettings):
     jev_dedup_window_seconds: float = 90.0
     gemma_model: str = "google/gemma-4-26b-a4b-it"
     gemma_chat_completions_url: str = "https://openrouter.ai/api/v1/chat/completions"
+
+    # Google Drive OAuth and API settings. The refresh token is persisted by
+    # the backend after the one-time browser authorization flow.
+    google_drive_client_id: str = Field(default="", validation_alias="GOOGLE_DRIVE_CLIENT_ID")
+    google_drive_client_secret: str = Field(default="", validation_alias="GOOGLE_DRIVE_CLIENT_SECRET")
+    google_drive_redirect_uri: str = Field(
+        default="http://localhost:8000/api/integrations/google-drive/oauth/callback",
+        validation_alias="GOOGLE_DRIVE_REDIRECT_URI",
+    )
+    google_drive_oauth_state_secret: str = Field(
+        default="", validation_alias="GOOGLE_DRIVE_OAUTH_STATE_SECRET"
+    )
+    google_drive_token_path: str = Field(
+        default=".data/google_drive_token.json",
+        validation_alias="GOOGLE_DRIVE_TOKEN_PATH",
+    )
+    google_drive_scopes: str = Field(
+        default="https://www.googleapis.com/auth/drive.readonly",
+        validation_alias="GOOGLE_DRIVE_SCOPES",
+    )
+    google_drive_timeout_seconds: float = Field(
+        default=8.0, validation_alias="GOOGLE_DRIVE_TIMEOUT_SECONDS"
+    )
     
 
 settings = Settings()
