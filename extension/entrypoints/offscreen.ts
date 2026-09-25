@@ -1,4 +1,5 @@
 import { AUDIO_MIME_TYPE, AUDIO_WINDOW_MS, MEETING_SOCKET_URL } from '../lib/config';
+import type { JevAction } from '../lib/types';
 
 let recorder: MediaRecorder | undefined;
 let tabStream: MediaStream | undefined;
@@ -108,6 +109,23 @@ async function start(streamId: string) {
     // Release the selected tab and mic when the backend disconnects.
     void stop();
   };
+  sessionSocket.onmessage = (event) => {
+    if (socket !== sessionSocket || stopping || typeof event.data !== 'string') return;
+    try {
+      const message = JSON.parse(event.data) as { type?: string; decision?: string; confidence?: number };
+      const actionable = message.decision === 'SEARCH_EXISTING_WORK' || message.decision === 'SUGGEST_NEW_TASK';
+      if (message.type !== 'jev_decision' || !actionable || typeof message.confidence !== 'number') return;
+      notify({
+        jevDecision: {
+          action: message.decision as JevAction,
+          confidence: Math.max(0, Math.min(1, message.confidence)),
+          receivedAt: Date.now(),
+        },
+      });
+    } catch {
+      // Ignore malformed or unrelated backend messages.
+    }
+  };
 
   audioContext = new AudioContext();
   await audioContext.resume();
@@ -145,7 +163,7 @@ async function start(streamId: string) {
     void stop();
   };
   startRecordingWindow(activeRecorder);
-  notify({ captureStatus: 'connecting', backendConnected: false, error: undefined });
+  notify({ captureStatus: 'connecting', backendConnected: false, jevDecision: undefined, error: undefined });
 }
 
 async function stop() {

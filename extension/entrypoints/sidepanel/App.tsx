@@ -312,6 +312,11 @@ export default function App() {
       : inMeeting ? 'You’re in a Google Meet call'
         : state.meetingStatus === 'unknown' && isMeetTab(activeTab) ? 'Connect this Meet tab'
           : 'Ready when you are';
+  const jevDecisionCopy = state.jevDecision?.action === 'SEARCH_EXISTING_WORK'
+    ? { title: 'Search existing work', detail: 'The conversation points to work that may already be tracked.' }
+    : state.jevDecision?.action === 'SUGGEST_NEW_TASK'
+      ? { title: 'Suggest a new task', detail: 'The conversation introduced a clear follow-up worth tracking.' }
+      : undefined;
 
   return (
     <main className="shell">
@@ -336,6 +341,15 @@ export default function App() {
       {state.captureStatus === 'error' && state.error
         ? <div className="notice error" role="alert">{state.error}</div>
         : notice && <div className={`notice ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.text}</div>}
+
+      {state.jevDecision && jevDecisionCopy && (
+        <section className="decision-card" aria-live="polite">
+          <div className="decision-label">Jev decision</div>
+          <strong>{jevDecisionCopy.title}</strong>
+          <p>{jevDecisionCopy.detail}</p>
+          <span>{Math.round(state.jevDecision.confidence * 100)}% confidence</span>
+        </section>
+      )}
 
       <section className="section-card">
         <div className="section-heading">

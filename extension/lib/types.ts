@@ -1,5 +1,12 @@
 export type MeetingStatus = 'unknown' | 'not-in-meeting' | 'in-meeting';
 export type CaptureStatus = 'idle' | 'connecting' | 'capturing' | 'error';
+export type JevAction = 'SEARCH_EXISTING_WORK' | 'SUGGEST_NEW_TASK';
+
+export interface JevDecision {
+  action: JevAction;
+  confidence: number;
+  receivedAt: number;
+}
 
 export interface ExtensionState {
   meetingStatus: MeetingStatus;
@@ -9,6 +16,7 @@ export interface ExtensionState {
   revision?: number;
   captureStatus: CaptureStatus;
   backendConnected: boolean;
+  jevDecision?: JevDecision;
   error?: string;
 }
 

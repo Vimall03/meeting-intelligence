@@ -224,7 +224,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
 async function stopCapture() {
   const result = await chrome.runtime.sendMessage({ type: 'STOP_OFFSCREEN' }).catch(() => undefined) as { ok?: boolean } | undefined;
   if (result && !result.ok) throw new Error('Could not release the audio capture. Try stopping it again.');
-  state = { ...state, captureStatus: 'idle', captureTabId: undefined, backendConnected: false, error: undefined };
+  state = { ...state, captureStatus: 'idle', captureTabId: undefined, backendConnected: false, jevDecision: undefined, error: undefined };
   await broadcast();
 }
 
