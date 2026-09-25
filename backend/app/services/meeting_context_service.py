@@ -33,6 +33,13 @@ class TranscriptSegment:
     speaker: str = "UNKNOWN"
 
 
+@dataclass(frozen=True, slots=True)
+class JevContextSnapshot:
+    recent_context: str
+    new_context: str
+    segment_count: int
+
+
 class MeetingContextService:
     """Keeps the most recent meaningful portion of a live transcript."""
 
@@ -53,7 +60,9 @@ class MeetingContextService:
         self.max_segments = max_segments
         self.turn_gap_seconds = turn_gap_seconds
         self._segments: list[TranscriptSegment] = []
+        self._unevaluated_segments: list[TranscriptSegment] = []
         self._seen: set[tuple[float, float, str, str]] = set()
+        self.last_jev_evaluation_time: float | None = None
 
     def add_segments(
         self, segments: Iterable[Mapping[str, object]]
@@ -70,6 +79,7 @@ class MeetingContextService:
                 continue
 
             self._segments.append(segment)
+            self._unevaluated_segments.append(segment)
             self._seen.add(segment_key)
             accepted.append(segment)
 
@@ -86,8 +96,34 @@ class MeetingContextService:
 
     def as_text(self) -> str:
         """Return the rolling transcript as conversational speaker turns."""
+        return self._segments_as_text(self._segments)
+
+    def prepare_jev_context(self) -> JevContextSnapshot | None:
+        """Build a stable Jev snapshot without consuming newly added text."""
+        if not self._unevaluated_segments:
+            return None
+        return JevContextSnapshot(
+            recent_context=self.as_text(),
+            new_context=self._segments_as_text(self._unevaluated_segments),
+            segment_count=len(self._unevaluated_segments),
+        )
+
+    def complete_jev_evaluation(
+        self, snapshot: JevContextSnapshot, evaluated_at: float
+    ) -> None:
+        """Commit a successful evaluation while preserving later arrivals."""
+        del self._unevaluated_segments[: snapshot.segment_count]
+        self.last_jev_evaluation_time = evaluated_at
+
+    def clear(self) -> None:
+        self._segments.clear()
+        self._unevaluated_segments.clear()
+        self._seen.clear()
+        self.last_jev_evaluation_time = None
+
+    def _segments_as_text(self, segments: Iterable[TranscriptSegment]) -> str:
         turns: list[TranscriptSegment] = []
-        for segment in self._segments:
+        for segment in segments:
             if (
                 turns
                 and segment.speaker == turns[-1].speaker
@@ -104,10 +140,6 @@ class MeetingContextService:
                 turns.append(segment)
 
         return "\n".join(f"{turn.speaker}: {turn.text}" for turn in turns)
-
-    def clear(self) -> None:
-        self._segments.clear()
-        self._seen.clear()
 
     def _clean_segment(
         self, raw_segment: Mapping[str, object]

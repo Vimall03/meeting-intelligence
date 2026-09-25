@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     whisperx_model_compute_type: str = "int8"
     meeting_context_window_seconds: float = 45.0
     meeting_context_turn_gap_seconds: float = 12.0
+    openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
+    jev_model: str = "typesafe/jev-1.13"
+    jev_decisions_url: str = "https://openrouter.ai/api/alpha/decisions"
+    jev_search_threshold: float = 0.75
+    jev_task_threshold: float = 0.75
+    jev_dedup_window_seconds: float = 90.0
     
 
 settings = Settings()
