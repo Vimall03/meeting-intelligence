@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     whisperx_model_size: str = "small"
     whisperx_device: str = "cpu"
     whisperx_model_compute_type: str = "int8"
+    meeting_context_window_seconds: float = 45.0
+    meeting_context_turn_gap_seconds: float = 12.0
     
 
 settings = Settings()

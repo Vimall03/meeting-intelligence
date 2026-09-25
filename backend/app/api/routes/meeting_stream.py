@@ -3,16 +3,18 @@ import contextlib
 import logging
 import tempfile
 import time
+from collections import deque
 from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 
+from app.core.config import settings
+from app.services.meeting_context_service import MeetingContextService
 from app.services.transcription_services import transcribe_realtime_chunk
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn.error")
-TRANSCRIPTION_INTERVAL_SECONDS = 8
 
 
 def write_audio_snapshot(audio: bytes) -> str:
@@ -21,13 +23,12 @@ def write_audio_snapshot(audio: bytes) -> str:
         return audio_file.name
 
 
-async def transcribe_snapshot(audio: bytes, start_seconds: float) -> dict:
+async def transcribe_snapshot(audio: bytes) -> dict:
     snapshot_path = Path(await run_in_threadpool(write_audio_snapshot, audio))
     try:
         return await run_in_threadpool(
             transcribe_realtime_chunk,
             str(snapshot_path),
-            start_seconds,
         )
     finally:
         snapshot_path.unlink(missing_ok=True)
@@ -35,17 +36,19 @@ async def transcribe_snapshot(audio: bytes, start_seconds: float) -> dict:
 @router.websocket("/ws/meeting")
 async def meeting_stream(websocket: WebSocket):
     await websocket.accept()
-    audio_buffer = bytearray()
-    last_transcribed_at = time.monotonic()
-    last_segment_end = 0.0
+    pending_audio_windows: deque[bytes] = deque()
     transcribed_audio_end = 0.0
+    meeting_context = MeetingContextService(
+        window_seconds=settings.meeting_context_window_seconds,
+        turn_gap_seconds=settings.meeting_context_turn_gap_seconds,
+    )
     transcription_task: asyncio.Task[dict] | None = None
     transcription_started_at: float | None = None
     try:
         while True:
             try:
                 data = await asyncio.wait_for(websocket.receive_bytes(), timeout=1)
-                audio_buffer.extend(data)
+                pending_audio_windows.append(data)
             except asyncio.TimeoutError:
                 pass
 
@@ -58,38 +61,47 @@ async def meeting_stream(websocket: WebSocket):
                 except Exception:
                     logger.exception("Transcription failed")
                 else:
-                    transcribed_audio_end = transcript["audio_duration"]
                     elapsed = time.monotonic() - transcription_started_at if transcription_started_at else 0
                     logger.info("Transcription completed in %.1f seconds", elapsed)
                     new_segments = [
-                        segment for segment in transcript["segments"]
-                        if segment["end"] > last_segment_end
+                        {
+                            **segment,
+                            "start": segment["start"] + transcribed_audio_end,
+                            "end": segment["end"] + transcribed_audio_end,
+                        }
+                        for segment in transcript["segments"]
                     ]
+                    transcribed_audio_end += transcript["audio_duration"]
                     if new_segments:
-                        last_segment_end = max(segment["end"] for segment in new_segments)
-                        for segment in new_segments:
+                        accepted_segments = meeting_context.add_segments(new_segments)
+                        for segment in accepted_segments:
                             logger.info(
                                 "%s: %s",
-                                segment.get("speaker", "UNKNOWN"),
-                                segment["text"],
+                                segment.speaker,
+                                segment.text,
+                            )
+                        if accepted_segments:
+                            logger.info(
+                                "Active meeting context:\n%s",
+                                meeting_context.as_text(),
                             )
                     elif not transcript["segments"]:
                         logger.info("No speech detected in the audio snapshot")
 
             if (
                 transcription_task is None
-                and audio_buffer
-                and now - last_transcribed_at >= TRANSCRIPTION_INTERVAL_SECONDS
+                and pending_audio_windows
             ):
-                last_transcribed_at = now
                 transcription_started_at = now
+                audio_window = pending_audio_windows.popleft()
                 logger.info(
-                    "Transcribing audio after %.1f seconds (%d total bytes)",
+                    "Transcribing audio window at %.1f seconds (%d bytes, %d queued)",
                     transcribed_audio_end,
-                    len(audio_buffer),
+                    len(audio_window),
+                    len(pending_audio_windows),
                 )
                 transcription_task = asyncio.create_task(
-                    transcribe_snapshot(bytes(audio_buffer), transcribed_audio_end)
+                    transcribe_snapshot(audio_window)
                 )
     except WebSocketDisconnect:
         pass

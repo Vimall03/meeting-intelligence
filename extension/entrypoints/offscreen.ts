@@ -1,4 +1,4 @@
-import { AUDIO_CHUNK_MS, AUDIO_MIME_TYPE, MEETING_SOCKET_URL } from '../lib/config';
+import { AUDIO_MIME_TYPE, AUDIO_WINDOW_MS, MEETING_SOCKET_URL } from '../lib/config';
 
 let recorder: MediaRecorder | undefined;
 let tabStream: MediaStream | undefined;
@@ -10,6 +10,7 @@ let tabSource: MediaStreamAudioSourceNode | undefined;
 let microphoneSource: MediaStreamAudioSourceNode | undefined;
 let tabGain: GainNode | undefined;
 let microphoneGain: GainNode | undefined;
+let recordingWindowTimer: ReturnType<typeof setTimeout> | undefined;
 let stopping = false;
 let captureGeneration = 0;
 let startPending = false;
@@ -20,6 +21,16 @@ function assertCurrent(generation: number) {
     microphoneStream?.getTracks().forEach((track) => track.stop());
     throw new DOMException('Capture was canceled.', 'AbortError');
   }
+}
+
+function startRecordingWindow(activeRecorder: MediaRecorder) {
+  if (recorder !== activeRecorder || stopping) return;
+  activeRecorder.start();
+  recordingWindowTimer = setTimeout(() => {
+    if (recorder === activeRecorder && !stopping && activeRecorder.state === 'recording') {
+      activeRecorder.stop();
+    }
+  }, AUDIO_WINDOW_MS);
 }
 
 async function start(streamId: string) {
@@ -123,18 +134,25 @@ async function start(streamId: string) {
   activeRecorder.ondataavailable = (event) => {
     if (recorder === activeRecorder && event.data.size > 0 && sessionSocket.readyState === WebSocket.OPEN) sessionSocket.send(event.data);
   };
+  activeRecorder.onstop = () => {
+    if (recordingWindowTimer) clearTimeout(recordingWindowTimer);
+    recordingWindowTimer = undefined;
+    startRecordingWindow(activeRecorder);
+  };
   activeRecorder.onerror = () => {
     if (recorder !== activeRecorder) return;
     notify({ captureStatus: 'error', backendConnected: false, error: 'Audio capture failed.' });
     void stop();
   };
-  activeRecorder.start(AUDIO_CHUNK_MS);
+  startRecordingWindow(activeRecorder);
   notify({ captureStatus: 'connecting', backendConnected: false, error: undefined });
 }
 
 async function stop() {
   captureGeneration += 1;
   stopping = true;
+  if (recordingWindowTimer) clearTimeout(recordingWindowTimer);
+  recordingWindowTimer = undefined;
   const activeRecorder = recorder;
   recorder = undefined;
 
