@@ -1,0 +1,19 @@
+:root {
+  color: #182230;
+  background: #f6f8fb;
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* { box-sizing: border-box; }
+body { display: grid; min-width: 280px; min-height: 100vh; margin: 0; padding: 24px; place-items: center; }
+.card { position: relative; width: min(440px, 100%); padding: 28px; border: 1px solid #e2e7ef; border-radius: 18px; background: #fff; box-shadow: 0 12px 38px #14213d12; text-align: center; }
+.brand-mark { display: grid; width: 44px; height: 44px; margin: 0 auto 16px; place-items: center; border-radius: 13px; color: #fff; background: linear-gradient(145deg, #3277ef, #1759c7); font-size: 19px; font-weight: 750; }
+h1 { margin: 0; font-size: 19px; letter-spacing: -.3px; }
+#status { margin: 9px 0 0; color: #37506f; font-weight: 650; }
+.help { margin: 10px 0 0; color: #758195; font-size: 12px; }
+.close { position: absolute; top: 12px; right: 12px; display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid #e1e6ee; border-radius: 9px; color: #64748b; background: #fff; font-size: 21px; line-height: 1; cursor: pointer; }
+.close:hover { background: #f7f9fc; }
+.close:focus-visible { outline: 3px solid #8bb6ff; outline-offset: 2px; }
