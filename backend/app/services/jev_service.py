@@ -6,13 +6,13 @@ import httpx
 
 
 @dataclass(frozen=True, slots=True)
-class JevRoutingDecision:
+class JevDecision:
     search_existing_work_probability: float
     suggest_new_task_probability: float
     cost: float | None = None
 
 
-class JevRoutingService:
+class JevService:
     def __init__(
         self,
         api_key: str,
@@ -31,7 +31,7 @@ class JevRoutingService:
 
     async def decide(
         self, recent_context: str, new_context: str
-    ) -> JevRoutingDecision:
+    ) -> JevDecision:
         response = await self._client.post(
             self._endpoint,
             json={
@@ -79,7 +79,7 @@ class JevRoutingService:
             answers.get("should_suggest_new_task", {}).get("noul", 0.0)
         )
         usage = payload.get("usage", {})
-        return JevRoutingDecision(
+        return JevDecision(
             search_existing_work_probability=search_probability,
             suggest_new_task_probability=task_probability,
             cost=float(usage["cost"]) if usage.get("cost") is not None else None,

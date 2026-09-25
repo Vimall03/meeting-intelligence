@@ -3,10 +3,10 @@ import unittest
 
 import httpx
 
-from app.services.jev_routing_service import JevRoutingService
+from app.services.jev_service import JevService
 
 
-class JevRoutingServiceTests(unittest.IsolatedAsyncioTestCase):
+class JevServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_sends_context_and_parses_noul_probabilities(self) -> None:
         async def respond(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.headers["authorization"], "Bearer test-key")
@@ -31,7 +31,7 @@ class JevRoutingServiceTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
 
-        service = JevRoutingService(
+        service = JevService(
             api_key="test-key",
             transport=httpx.MockTransport(respond),
         )
@@ -45,7 +45,7 @@ class JevRoutingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.cost, 0.00001)
 
     async def test_defaults_missing_answers_to_zero(self) -> None:
-        service = JevRoutingService(
+        service = JevService(
             api_key="test-key",
             transport=httpx.MockTransport(
                 lambda _request: httpx.Response(200, json={"answers": {}})
