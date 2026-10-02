@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 
-function harness() {
+function harness({ failReplacement = false } = {}) {
   const messages = [], timeouts = new Map(), intervals = new Map(), sockets = [], recorders = [], contexts = [];
   let listener, timer = 0;
   const track = () => ({ readyState: 'live', muted: false, enabled: true, stop() { this.readyState = 'ended'; } });
@@ -45,7 +45,12 @@ function harness() {
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
     exports: {}, require(name) { return name.includes('config') ? { AUDIO_MIME_TYPE: 'audio/webm', AUDIO_WINDOW_MS: 3000, MEETING_SOCKET_URL: 'ws://localhost' } : { isTimelineSnapshot: message => message.type === 'timeline_snapshot' }; },
     defineUnlistedScript: callback => callback(), DOMException, MediaRecorder: Recorder, WebSocket: Socket, AudioContext: Context,
-    navigator: { mediaDevices: { async getUserMedia(options) { return options.audio.mandatory ? tab : ++micRequests === 1 ? microphone : replacement; } } },
+    navigator: { mediaDevices: { async getUserMedia(options) {
+      if (options.audio.mandatory) return tab;
+      if (++micRequests === 1) return microphone;
+      if (failReplacement) throw new DOMException('Device is busy', 'NotReadableError');
+      return replacement;
+    } } },
     chrome: { runtime: { onMessage: { addListener(callback) { listener = callback; } }, async sendMessage(message) { messages.push(message); } } },
     setTimeout(callback) { timeouts.set(++timer, callback); return timer; }, clearTimeout(id) { timeouts.delete(id); },
     setInterval(callback) { intervals.set(++timer, callback); return timer; }, clearInterval(id) { intervals.delete(id); },
@@ -86,4 +91,24 @@ test('capture resumes a suspended mixer and replaces a disconnected microphone',
   assert.equal(h.sockets[0].sent.length, 1);
   await h.send({ type: 'STOP_OFFSCREEN' });
   assert.equal(h.replacement.getTracks()[0].readyState, 'ended');
+});
+
+test('failed microphone recovery keeps the websocket and Meet capture alive', async () => {
+  const h = harness({ failReplacement: true });
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
+  const socket = h.sockets[0];
+  h.microphone.getTracks()[0].readyState = 'ended';
+  h.health();
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(socket.readyState, 1);
+  assert.equal(h.recorders[0].state, 'recording');
+  assert.equal(h.messages.at(-1).state.captureStatus, undefined);
+  assert.match(h.messages.at(-1).state.audioWarning, /transcription, and searches are still running/);
+
+  h.window();
+  assert.equal(socket.sent.length, 1);
+  socket.onmessage({ data: JSON.stringify({ type: 'transcription_state', transcript: 'Search processing continued.', warning: null }) });
+  assert.equal(h.messages.at(-1).state.transcript, 'Search processing continued.');
+  await h.send({ type: 'STOP_OFFSCREEN' });
 });

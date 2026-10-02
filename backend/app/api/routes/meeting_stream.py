@@ -142,6 +142,12 @@ async def meeting_stream(websocket: WebSocket):
                 }
             )
             if llm is not None:
+                logger.info(
+                    "%s request action=%s refinement=%s",
+                    _log_tag("LLM"),
+                    event.type,
+                    event.is_refinement,
+                )
                 llm_tasks.append(
                     (
                         asyncio.create_task(llm.process_event(event)),
@@ -480,7 +486,14 @@ async def meeting_stream(websocket: WebSocket):
                         evaluate_new_context(meeting_context, jev)
                     )
     except WebSocketDisconnect:
-        pass
+        if llm_tasks or drive_tasks or atlassian_tasks:
+            logger.warning(
+                "%s client disconnected pending_llm=%d pending_drive=%d pending_atlassian=%d",
+                _log_tag("LLM"),
+                len(llm_tasks),
+                len(drive_tasks),
+                len(atlassian_tasks),
+            )
     finally:
         if transcription_task:
             transcription_task.cancel()

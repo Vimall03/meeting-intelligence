@@ -29,7 +29,11 @@ During local development, click the reload icon for Meeting Intelligence in `chr
 
 The live transcript retains the latest 3,000 characters for the current capture.
 The audio page checks microphone tracks and mixer state every three seconds,
-resumes a suspended mixer, and tries to reopen a disconnected microphone.
+resumes a suspended mixer, and tries to reopen a disconnected microphone. If
+the microphone cannot reopen immediately, Meet-tab capture and the backend
+WebSocket stay active so pending transcription, retrieval, and task work can
+finish. Microphone recovery retries with bounded backoff instead of ending the
+whole meeting capture.
 Quiet input and recognition failures show separate notices. These checks do
 not infer that silence is a fault; they explain what to check if you are speaking.
 A side-panel permission query reporting `prompt` does not erase a previously

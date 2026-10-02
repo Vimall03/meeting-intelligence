@@ -171,10 +171,18 @@ async function start(streamId: string, sessionId: string) {
   };
   let quietSince = Date.now();
   let recoveringMicrophone = false;
+  let microphoneRecoveryAttempts = 0;
+  let nextMicrophoneRecoveryAt = 0;
   const recoverMicrophone = async () => {
-    if (recoveringMicrophone || stopping || generation !== captureGeneration) return;
+    const now = Date.now();
+    if (
+      recoveringMicrophone
+      || stopping
+      || generation !== captureGeneration
+      || now < nextMicrophoneRecoveryAt
+    ) return;
     recoveringMicrophone = true;
-    notify({ audioWarning: 'Microphone disconnected. Reconnecting…' });
+    notify({ audioWarning: 'Microphone unavailable. Meet audio and searches are still running while it reconnects…' });
     try {
       const replacement = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false,
@@ -190,14 +198,24 @@ async function start(streamId: string, sessionId: string) {
       microphoneSource.connect(microphoneGain!);
       microphoneSource.connect(microphoneAnalyser);
       quietSince = Date.now();
+      microphoneRecoveryAttempts = 0;
+      nextMicrophoneRecoveryAt = 0;
+      await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: true }).catch(() => undefined);
       notify({ audioWarning: undefined });
     } catch (error) {
       if (stopping || generation !== captureGeneration) return;
+      microphoneRecoveryAttempts += 1;
+      const retryDelayMs = Math.min(30_000, 3_000 * 2 ** (microphoneRecoveryAttempts - 1));
+      nextMicrophoneRecoveryAt = Date.now() + retryDelayMs;
       if (error instanceof Error && ['NotAllowedError', 'SecurityError'].includes(error.name)) {
         await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: false }).catch(() => undefined);
       }
-      notify({ captureStatus: 'error', backendConnected: false, error: 'The microphone disconnected and could not be reopened. Check your input device, then restart capture.' });
-      void stop();
+      const reason = error instanceof Error && error.name
+        ? ` (${error.name})`
+        : '';
+      notify({
+        audioWarning: `Microphone unavailable${reason}. Meet audio, transcription, and searches are still running; retrying automatically.`,
+      });
     } finally {
       recoveringMicrophone = false;
     }
@@ -206,12 +224,14 @@ async function start(streamId: string, sessionId: string) {
   // ends or Web Audio is suspended. Check the actual sources, not just recorder.state.
   audioHealthTimer = setInterval(() => {
     if (stopping || generation !== captureGeneration) return;
-    if (tabStream?.getAudioTracks().every((track) => track.readyState === 'ended')) {
+    const tabTracks = tabStream?.getAudioTracks() ?? [];
+    if (tabTracks.length === 0 || tabTracks.every((track) => track.readyState === 'ended')) {
       notify({ captureStatus: 'error', backendConnected: false, error: 'Meet tab audio ended. Restart capture in the active call.' });
       void stop();
       return;
     }
-    if (microphoneStream?.getAudioTracks().every((track) => track.readyState === 'ended')) {
+    const microphoneTracks = microphoneStream?.getAudioTracks() ?? [];
+    if (microphoneTracks.length === 0 || microphoneTracks.every((track) => track.readyState === 'ended')) {
       void recoverMicrophone();
       return;
     }
@@ -223,7 +243,7 @@ async function start(streamId: string, sessionId: string) {
     if (recoveringMicrophone) return;
     const hasAudio = level(microphoneAnalyser) > 0.001 || level(tabAnalyser) > 0.001;
     if (hasAudio) quietSince = Date.now();
-    const muted = microphoneStream?.getAudioTracks().some((track) => track.muted || !track.enabled);
+    const muted = microphoneTracks.some((track) => track.muted || !track.enabled);
     notify({ audioWarning: muted ? 'Your microphone is not delivering audio. Check your input device.'
       : Date.now() - quietSince > 15000 ? 'No audio detected. If you are speaking, check the microphone selected in Brave.' : undefined });
   }, 3000);
