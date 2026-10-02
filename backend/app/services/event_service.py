@@ -25,7 +25,18 @@ INCOMPLETE_HARD_CAP_SECONDS = 6.0
 # moment later (e.g. the actual document title) can refine the query.
 SEARCH_SESSION_SECONDS = 20.0
 MIN_REFINEMENT_INTERVAL_SECONDS = 2.5
-MAX_REFINEMENTS_PER_SESSION = 2
+MAX_REFINEMENTS_PER_SESSION = 1
+
+# Words too generic to decide whether two searches share a topic.
+_TOPIC_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "the", "for", "of", "on", "to", "in", "with", "about",
+        "doc", "docs", "document", "documents", "file", "files", "page", "pages",
+        "sheet", "sheets", "spreadsheet", "slide", "slides", "deck", "report",
+        "notes", "draft", "version", "latest", "new", "old", "update", "updates",
+        "updated",
+    }
+)
 
 _INCOMPLETE_TRAILING_WORDS = frozenset(
     {
@@ -57,6 +68,9 @@ class MeetingEvent:
     triggering_context: str
     is_refinement: bool = False
     previous_search_terms: tuple[str, ...] = ()
+    # Raised while the active search topic is frozen; only searches if the
+    # resulting terms turn out to be a different topic.
+    is_topic_check: bool = False
 
 
 @dataclass(slots=True)
@@ -68,6 +82,7 @@ class _PendingEvent:
     text_parts: list[str] = field(default_factory=list)
     new_word_count: int = 0
     is_refinement: bool = False
+    is_topic_check: bool = False
 
 
 @dataclass(slots=True)
@@ -75,8 +90,33 @@ class _SearchSession:
     score: float
     last_search_at: float
     last_text: str
+    last_activity_at: float
     refinements: int = 0
     searched_terms: list[str] = field(default_factory=list)
+
+
+def _topic_tokens(terms: Sequence[str]) -> set[str]:
+    tokens: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+", " ".join(terms).casefold()):
+        if token in _TOPIC_STOPWORDS or len(token) < 3:
+            continue
+        if len(token) > 3 and token.endswith("s"):
+            token = token[:-1]
+        tokens.add(token)
+    return tokens
+
+
+def _shares_topic(new_terms: Sequence[str], known_terms: Sequence[str]) -> bool:
+    known = _topic_tokens(known_terms)
+    for token in _topic_tokens(new_terms):
+        for known_token in known:
+            if token == known_token:
+                return True
+            shorter, longer = sorted((token, known_token), key=len)
+            # e.g. "chart" / "flowchart"
+            if len(shorter) >= 4 and shorter in longer:
+                return True
+    return False
 
 
 def _ends_sentence(text: str) -> bool:
@@ -126,7 +166,7 @@ class EventService:
             "SUGGEST_NEW_TASK": task_threshold,
         }
         self._dedupe_window_seconds = dedupe_window_seconds
-        self._last_emitted_at: dict[EventType, float] = {}
+        self._recent_task_triggers: list[tuple[float, str]] = []
         self._pending: dict[EventType, _PendingEvent] = {}
         self._search_session: _SearchSession | None = None
         self._recent_search_topics: list[tuple[float, frozenset[str]]] = []
@@ -141,10 +181,20 @@ class EventService:
         all_terms: Sequence[str],
         is_refinement: bool,
         now: float,
+        is_topic_check: bool = False,
     ) -> bool:
         """Record terms from Gemma and say whether they merit a Drive search.
-        Refinements only search when they add a new primary term."""
+        Refinements only search when they add a new primary term. Topic checks
+        only search (and open a new session) when the topic materially changed."""
         self.last_search_terms_suppression_reason = None
+        if is_topic_check:
+            session = self._active_search_session(now)
+            if session is not None and _shares_topic(
+                primary_terms, session.searched_terms
+            ):
+                session.last_activity_at = now
+                self.last_search_terms_suppression_reason = "search_topic_frozen"
+                return False
         self._recent_search_topics[:] = [
             (searched_at, topic)
             for searched_at, topic in self._recent_search_topics
@@ -163,6 +213,15 @@ class EventService:
                 ):
                     self.last_search_terms_suppression_reason = "duplicate_search_topic"
                     return False
+
+        if is_topic_check:
+            previous = self._search_session
+            self._search_session = _SearchSession(
+                score=previous.score if previous is not None else 0.0,
+                last_search_at=now,
+                last_text="",
+                last_activity_at=now,
+            )
 
         session = self._active_search_session(now)
         if session is None:
@@ -183,7 +242,7 @@ class EventService:
 
     def _active_search_session(self, now: float) -> _SearchSession | None:
         session = self._search_session
-        if session is None or now - session.last_search_at >= SEARCH_SESSION_SECONDS:
+        if session is None or now - session.last_activity_at >= SEARCH_SESSION_SECONDS:
             return None
         return session
 
@@ -220,41 +279,35 @@ class EventService:
                 )
                 continue
             is_refinement = False
+            is_topic_check = False
             session = (
                 self._active_search_session(now)
                 if event_type == "SEARCH_EXISTING_WORK"
                 else None
             )
             if session is not None:
-                if not self._can_refine(session, now):
-                    if session.refinements < MAX_REFINEMENTS_PER_SESSION:
-                        logger.info(
-                            "%s action suppressed action=%s confidence=%.2f reason=refinement_cooldown",
-                            _JEV_LOG_TAG,
-                            event_type,
-                            probability,
-                        )
-                        continue
+                if session.refinements >= MAX_REFINEMENTS_PER_SESSION:
                     logger.info(
-                        "%s new intent action=%s confidence=%.2f reason=refinement_limit_reached",
+                        "%s topic check action=%s confidence=%.2f reason=refinement_limit_reached",
                         _JEV_LOG_TAG,
                         event_type,
                         probability,
                     )
+                    is_topic_check = True
+                elif not self._can_refine(session, now):
+                    logger.info(
+                        "%s action suppressed action=%s confidence=%.2f reason=refinement_cooldown",
+                        _JEV_LOG_TAG,
+                        event_type,
+                        probability,
+                    )
+                    continue
                 else:
                     is_refinement = True
-            elif event_type != "SEARCH_EXISTING_WORK":
-                last_emitted_at = self._last_emitted_at.get(event_type)
-                if (
-                    last_emitted_at is not None
-                    and now - last_emitted_at < self._dedupe_window_seconds
-                ):
-                    logger.info(
-                        "%s action suppressed action=%s confidence=%.2f reason=event_type_dedupe_window",
-                        _JEV_LOG_TAG,
-                        event_type,
-                        probability,
-                    )
+            elif event_type == "SUGGEST_NEW_TASK":
+                self._recent_task_triggers[:] = [(at, text) for at, text in self._recent_task_triggers if now - at < self._dedupe_window_seconds]
+                trigger = " ".join(triggering_context.casefold().split())
+                if any(trigger == text for _, text in self._recent_task_triggers):
                     continue
             self._pending[event_type] = _PendingEvent(
                 type=event_type,
@@ -264,6 +317,7 @@ class EventService:
                 text_parts=[triggering_context],
                 new_word_count=len(triggering_context.split()),
                 is_refinement=is_refinement,
+                is_topic_check=is_topic_check,
             )
         return self._finalize_ready(
             now, recent_context=recent_context, just_appended=triggering_context
@@ -338,20 +392,26 @@ class EventService:
             if not should_finalize:
                 continue
             del self._pending[event_type]
-            self._last_emitted_at[event_type] = now
+            if event_type == "SUGGEST_NEW_TASK":
+                self._recent_task_triggers.append((now, " ".join(triggering_context.casefold().split())))
             previous_search_terms: tuple[str, ...] = ()
             if event_type == "SEARCH_EXISTING_WORK":
                 session = self._search_session
                 if pending.is_refinement and session is not None:
                     session.refinements += 1
                     session.last_search_at = now
+                    session.last_activity_at = now
                     session.last_text = pending.text_parts[-1]
                     previous_search_terms = tuple(session.searched_terms)
+                elif pending.is_topic_check:
+                    # Session is replaced in accept_search_terms only if the topic changed.
+                    pass
                 else:
                     self._search_session = _SearchSession(
                         score=pending.score,
                         last_search_at=now,
                         last_text=pending.text_parts[-1],
+                        last_activity_at=now,
                     )
             events.append(
                 MeetingEvent(
@@ -362,6 +422,7 @@ class EventService:
                     triggering_context=triggering_context,
                     is_refinement=pending.is_refinement,
                     previous_search_terms=previous_search_terms,
+                    is_topic_check=pending.is_topic_check,
                 )
             )
         return events

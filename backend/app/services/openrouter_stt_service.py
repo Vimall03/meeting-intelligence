@@ -77,7 +77,11 @@ class OpenRouterTranscriptionService:
                 }
             )
 
-        return {"segments": segments, "audio_duration": audio_duration}
+        return {
+            "segments": segments, "audio_duration": audio_duration,
+            "audio_rms": float(np.sqrt(np.mean(np.square(audio)))),
+            "audio_peak": float(np.max(np.abs(audio))),
+        }
 
     @staticmethod
     def _encode_wav(audio: np.ndarray) -> bytes:

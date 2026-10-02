@@ -56,6 +56,7 @@ class OpenRouterTranscriptionServiceTests(unittest.TestCase):
             {
                 "segments": [{"start": 0.1, "end": 0.8, "text": "hello there"}],
                 "audio_duration": 1.0,
+                "audio_rms": 0.0, "audio_peak": 0.0,
             },
         )
 
@@ -81,6 +82,7 @@ class OpenRouterTranscriptionServiceTests(unittest.TestCase):
             {
                 "segments": [{"start": 0.0, "end": 2.0, "text": "spoken words"}],
                 "audio_duration": 2.0,
+                "audio_rms": 0.0, "audio_peak": 0.0,
             },
         )
 

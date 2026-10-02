@@ -54,6 +54,17 @@ class Settings(BaseSettings):
     google_drive_timeout_seconds: float = Field(
         default=8.0, validation_alias="GOOGLE_DRIVE_TIMEOUT_SECONDS"
     )
+
+    atlassian_client_id: str = Field(default="", validation_alias="ATLASSIAN_CLIENT_ID")
+    atlassian_client_secret: str = Field(default="", validation_alias="ATLASSIAN_CLIENT_SECRET")
+    atlassian_site_url: str = Field(default="", validation_alias="ATLASSIAN_SITE_URL")
+    atlassian_redirect_uri: str = Field(
+        default="http://localhost:8000/api/integrations/atlassian/oauth/callback",
+        validation_alias="ATLASSIAN_REDIRECT_URI",
+    )
+    atlassian_oauth_state_secret: str = Field(default="", validation_alias="ATLASSIAN_OAUTH_STATE_SECRET")
+    atlassian_token_path: str = Field(default=".data/atlassian_token.json", validation_alias="ATLASSIAN_TOKEN_PATH")
+    atlassian_timeout_seconds: float = Field(default=8.0, validation_alias="ATLASSIAN_TIMEOUT_SECONDS")
     
 
 settings = Settings()

@@ -24,6 +24,7 @@ class JevServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("explicit OR implicit retrieval intent", search_instructions)
             self.assertIn("let's pull up the cost comparison document", search_instructions)
             self.assertIn("answer yes proactively", search_instructions)
+            self.assertIn("strong yes even when the exact document name is unknown", search_instructions)
             self.assertIn("Answer no for generic conversation", search_instructions)
             return httpx.Response(
                 200,

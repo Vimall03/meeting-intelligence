@@ -18,6 +18,7 @@ from app.services.google_drive_service import (
 from app.services.jev_service import JevDecision, JevService
 from app.services.llm_service import LlmResult, LlmService
 from app.services.meeting_context_service import MeetingContextService
+from app.services.meeting_timeline_service import MeetingTimelineService
 from app.services.openrouter_stt_service import transcribe_realtime_chunk
 
 router = APIRouter()
@@ -28,6 +29,7 @@ _LOG_COLORS = {
     "JEV": "33",
     "LLM": "35",
     "DRIVE": "32",
+    "ATLASSIAN": "32",
 }
 
 
@@ -67,12 +69,21 @@ async def evaluate_new_context(
     meeting_context.complete_jev_evaluation(snapshot, time.monotonic())
     return decision, snapshot.new_context
 
+async def search_atlassian(atlassian, search_terms) -> dict:
+    if not (await atlassian.status())["connected"]:
+        return {"query": search_terms.query, "sources": {}, "errors": {}}
+    return await atlassian.search_relevant_files(search_terms, top_k=5)
+
+
 @router.websocket("/ws/meeting")
 async def meeting_stream(websocket: WebSocket):
     await websocket.accept()
     google_drive: GoogleDriveService = websocket.app.state.google_drive
+    atlassian = getattr(websocket.app.state, "atlassian", None)
     pending_audio_windows: deque[bytes] = deque()
     transcribed_audio_end = 0.0
+    transcript_text = ""
+    empty_audio_seconds = 0.0
     meeting_context = MeetingContextService(
         window_seconds=settings.meeting_context_window_seconds,
         turn_gap_seconds=settings.meeting_context_turn_gap_seconds,
@@ -102,11 +113,13 @@ async def meeting_stream(websocket: WebSocket):
         task_threshold=settings.jev_task_threshold,
         dedupe_window_seconds=settings.jev_dedup_window_seconds,
     )
+    timeline = MeetingTimelineService()
     jev_task: asyncio.Task[tuple[JevDecision, str]] | None = None
     jev_started_at: float | None = None
     jev_evaluation_requested = False
     llm_tasks: list[tuple[asyncio.Task[LlmResult], float, MeetingEvent]] = []
     drive_tasks: list[tuple[asyncio.Task[dict], float, str]] = []
+    atlassian_tasks: list[tuple[asyncio.Task[dict], float, str]] = []
     if jev is None:
         logger.warning(
             "[MEETING][JEV] disabled reason=OPENROUTER_API_KEY_not_configured"
@@ -138,6 +151,7 @@ async def meeting_stream(websocket: WebSocket):
                 )
 
     try:
+        await websocket.send_json(timeline.snapshot())
         while True:
             try:
                 data = await asyncio.wait_for(websocket.receive_bytes(), timeout=0.25)
@@ -160,6 +174,7 @@ async def meeting_stream(websocket: WebSocket):
                         type(error).__name__,
                         error,
                     )
+                    await websocket.send_json({"type": "transcription_state", "transcript": transcript_text, "warning": "Transcription failed for this audio segment. Listening continues."})
                 else:
                     window_start = transcribed_audio_end
                     new_segments = [
@@ -172,13 +187,22 @@ async def meeting_stream(websocket: WebSocket):
                     ]
                     transcribed_audio_end += transcript["audio_duration"]
                     logger.info(
-                        "%s window=%.1fs-%.1fs latency=%.2fs segments=%d",
+                        "%s window=%.1fs-%.1fs latency=%.2fs segments=%d audio_rms=%.6f audio_peak=%.6f",
                         _log_tag("STT"),
                         window_start,
                         transcribed_audio_end,
                         latency,
                         len(new_segments),
+                        transcript.get("audio_rms", 0.0),
+                        transcript.get("audio_peak", 0.0),
                     )
+                    empty_audio_seconds = 0.0 if new_segments else empty_audio_seconds + transcript["audio_duration"]
+                    if new_segments:
+                        transcript_text = (transcript_text + " " + " ".join(segment["text"] for segment in new_segments)).strip()[-3000:]
+                    warning = None
+                    if empty_audio_seconds >= 15 and transcript.get("audio_rms", 0) > 0.001:
+                        warning = "Audio is arriving, but no words were recognized. Check the microphone input and speak clearly."
+                    await websocket.send_json({"type": "transcription_state", "transcript": transcript_text, "warning": warning})
                     if new_segments:
                         accepted_segments = meeting_context.add_segments(new_segments)
                         if accepted_segments:
@@ -289,6 +313,7 @@ async def meeting_stream(websocket: WebSocket):
                             weighted_terms,
                             is_refinement=event.is_refinement,
                             now=now,
+                            is_topic_check=event.is_topic_check,
                         ):
                             logger.info(
                                 "%s action suppressed action=SEARCH_EXISTING_WORK confidence=%.2f reason=%s",
@@ -322,6 +347,14 @@ async def meeting_stream(websocket: WebSocket):
                                     search_terms.query,
                                 )
                             )
+                            if atlassian is not None:
+                                atlassian_tasks.append(
+                                    (
+                                        asyncio.create_task(search_atlassian(atlassian, search_terms)),
+                                        time.perf_counter(),
+                                        search_terms.query,
+                                    )
+                                )
                     await websocket.send_json(
                         {
                             "type": "llm_result",
@@ -329,6 +362,22 @@ async def meeting_stream(websocket: WebSocket):
                             "data": result.data,
                         }
                     )
+                    if result.event_type == "SUGGEST_NEW_TASK":
+                        title = result.data.get("task_title", "")
+                        description = result.data.get("task_description", "")
+                        if title and description:
+                            timeline.add_task(
+                                title=title,
+                                description=description,
+                                confidence=event.score,
+                            )
+                            await websocket.send_json(timeline.snapshot())
+                        else:
+                            logger.warning(
+                                "%s skipped incomplete task suggestion data=%s",
+                                _log_tag("LLM"),
+                                result.data,
+                            )
                 llm_tasks = still_running
 
             if drive_tasks:
@@ -376,7 +425,41 @@ async def meeting_stream(websocket: WebSocket):
                             "files": retrieval["files"],
                         }
                     )
+                    search_item = timeline.add_search(
+                        query=retrieval["query"],
+                        files=retrieval["files"],
+                    )
+                    if search_item is not None:
+                        await websocket.send_json(timeline.snapshot())
                 drive_tasks = still_running_drive
+
+            if atlassian_tasks:
+                still_running_atlassian: list[tuple[asyncio.Task[dict], float, str]] = []
+                for task, started_at, query in atlassian_tasks:
+                    if not task.done():
+                        still_running_atlassian.append((task, started_at, query))
+                        continue
+                    try:
+                        retrieval = task.result()
+                    except Exception as error:
+                        logger.error("%s failed latency=%.2fs error=%s", _log_tag("ATLASSIAN"), time.perf_counter() - started_at, error)
+                        continue
+                    for source_id, source_label in (("jira", "Jira"), ("confluence", "Confluence")):
+                        files = retrieval["sources"].get(source_id, [])
+                        if not files:
+                            continue
+                        await websocket.send_json({
+                            "type": "RELATED_FILES", "source": source_id,
+                            "query": retrieval["query"], "files": files,
+                        })
+                        timeline.add_search(
+                            query=retrieval["query"], files=files,
+                            source_id=source_id, source_label=source_label,
+                        )
+                        await websocket.send_json(timeline.snapshot())
+                    for source_id, error in retrieval.get("errors", {}).items():
+                        logger.warning("%s search source=%s query=%r error=%s", _log_tag("ATLASSIAN"), source_id, query, error)
+                atlassian_tasks = still_running_atlassian
 
             if (
                 jev is not None
@@ -412,6 +495,10 @@ async def meeting_stream(websocket: WebSocket):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         for task, _, _ in drive_tasks:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        for task, _, _ in atlassian_tasks:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task

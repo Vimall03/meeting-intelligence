@@ -93,7 +93,7 @@ class LlmServiceTests(unittest.IsolatedAsyncioTestCase):
                             "message": {
                                 "content": json.dumps(
                                     {
-                                        "task_title": "Create ticket",
+                                        "task_title": "Investigate database error",
                                         "task_description": "...",
                                     }
                                 )
@@ -113,8 +113,55 @@ class LlmServiceTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await service.close()
 
-        self.assertEqual(result.data["task_title"], "Create ticket")
+        self.assertEqual(result.data["task_title"], "Investigate database error")
+        self.assertEqual(result.data["task_description"], "...")
         self.assertIsNone(result.cost)
+
+    async def test_normalizes_incomplete_task_result(self) -> None:
+        event = MeetingEvent(
+            type="SUGGEST_NEW_TASK",
+            score=0.8,
+            triggered_at=1,
+            recent_context="context",
+            triggering_context="Send it tomorrow.",
+        )
+        service = LlmService(
+            api_key="test-key",
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200,
+                    json={"choices": [{"message": {"content": json.dumps({"task_title": " Send it "})}}]},
+                )
+            ),
+        )
+        try:
+            result = await service.process_event(event)
+        finally:
+            await service.close()
+        self.assertEqual(result.data, {"task_title": "Send it", "task_description": ""})
+
+    async def test_retries_administrative_title_then_accepts_underlying_work(self) -> None:
+        calls = []
+        def respond(request):
+            calls.append(json.loads(request.content))
+            title = "Create Jira ticket for database error" if len(calls) == 1 else "Investigate database error"
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"task_title": title, "task_description": "Investigate the reported database error."})}}], "usage": {"cost": .001}})
+        service = LlmService("test", transport=httpx.MockTransport(respond))
+        try:
+            result = await service.process_event(MeetingEvent(type="SUGGEST_NEW_TASK", score=.9, triggered_at=0, recent_context="The database error has no ticket.", triggering_context="Create one for this."))
+        finally:
+            await service.close()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result.data["task_title"], "Investigate database error")
+        self.assertEqual(result.cost, .002)
+
+    async def test_repeated_bad_draft_is_not_shown_as_a_task(self) -> None:
+        service = LlmService("test", transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"task_title": "Create ticket", "task_description": "Create a Jira ticket."})}}]})))
+        try:
+            result = await service.process_event(MeetingEvent(type="SUGGEST_NEW_TASK", score=.9, triggered_at=0, recent_context="", triggering_context="Create a ticket."))
+        finally:
+            await service.close()
+        self.assertEqual(result.data, {"task_title": "", "task_description": ""})
 
 
 if __name__ == "__main__":

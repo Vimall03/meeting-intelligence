@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "description": "Synthetic natural meeting cases; observed using updated production prompts on 2026-10-03. Scores are a limited regression sample, not an accuracy guarantee.",
+  "thresholds": {
+    "search_existing": 0.75,
+    "suggest_new_task": 0.75
+  },
+  "windows": [
+    {
+      "id": "jira_status",
+      "recent_context": "We are reviewing checkout reliability.",
+      "new_context": "Are we still blocked on that checkout timeout ticket?",
+      "expected": {
+        "search_existing": true,
+        "suggest_new_task": false
+      },
+      "observed": {
+        "search_existing": 0.95,
+        "suggest_new_task": 0.09
+      }
+    },
+    {
+      "id": "confluence",
+      "recent_context": "The deployment is on Friday.",
+      "new_context": "What did we decide about rollback in the release runbook?",
+      "expected": {
+        "search_existing": true,
+        "suggest_new_task": false
+      },
+      "observed": {
+        "search_existing": 0.96,
+        "suggest_new_task": 0.12
+      }
+    },
+    {
+      "id": "drive",
+      "recent_context": "We are reviewing the infrastructure budget.",
+      "new_context": "These costs do not match the budget spreadsheet from last month.",
+      "expected": {
+        "search_existing": true,
+        "suggest_new_task": false
+      },
+      "observed": {
+        "search_existing": 0.93,
+        "suggest_new_task": 0.18
+      }
+    },
+    {
+      "id": "fragment",
+      "recent_context": "I have been trying to track it, but I do not see an existing ticket for it.",
+      "new_context": "The database error.",
+      "expected": {
+        "search_existing": true,
+        "suggest_new_task": false
+      },
+      "observed": {
+        "search_existing": 0.84,
+        "suggest_new_task": 0.32
+      }
+    },
+    {
+      "id": "database",
+      "recent_context": "One task has been missing for days. I have been trying to track it, but I do not see any existing log for it. It is the database error.",
+      "new_context": "So we need to create a ticket for this.",
+      "expected": {
+        "search_existing": false,
+        "suggest_new_task": true
+      },
+      "observed": {
+        "search_existing": 0.59,
+        "suggest_new_task": 0.9
+      }
+    },
+    {
+      "id": "soft_request",
+      "recent_context": "The CSV export drops the last row.",
+      "new_context": "Could you take a look after this call?",
+      "expected": {
+        "search_existing": false,
+        "suggest_new_task": true
+      },
+      "observed": {
+        "search_existing": 0.22,
+        "suggest_new_task": 0.91
+      }
+    },
+    {
+      "id": "commitment",
+      "recent_context": "Support needs the revised rollout notes.",
+      "new_context": "I will get those over to support tomorrow.",
+      "expected": {
+        "search_existing": false,
+        "suggest_new_task": true
+      },
+      "observed": {
+        "search_existing": 0.42,
+        "suggest_new_task": 0.94
+      }
+    },
+    {
+      "id": "negated",
+      "recent_context": "The checkout timeout could need a ticket.",
+      "new_context": "Actually do not file it; BTS-12 already covers that.",
+      "expected": {
+        "search_existing": true,
+        "suggest_new_task": false
+      },
+      "observed": {
+        "search_existing": 0.91,
+        "suggest_new_task": 0.04
+      }
+    },
+    {
+      "id": "smalltalk",
+      "recent_context": "Hello everyone.",
+      "new_context": "How was your weekend?",
+      "expected": {
+        "search_existing": false,
+        "suggest_new_task": false
+      },
+      "observed": {
+        "search_existing": 0.02,
+        "suggest_new_task": 0.01
+      }
+    },
+    {
+      "id": "hypothetical",
+      "recent_context": "Maybe one day we could rewrite the system.",
+      "new_context": "Just brainstorming, nothing agreed yet.",
+      "expected": {
+        "search_existing": false,
+        "suggest_new_task": false
+      },
+      "observed": {
+        "search_existing": 0.08,
+        "suggest_new_task": 0.04
+      }
+    },
+    {
+      "id": "completed",
+      "recent_context": "Yesterday I fixed the export problem.",
+      "new_context": "It is deployed and verified now.",
+      "expected": {
+        "search_existing": false,
+        "suggest_new_task": false
+      },
+      "observed": {
+        "search_existing": 0.25,
+        "suggest_new_task": 0.05
+      }
+    },
+    {
+      "id": "unresolved",
+      "recent_context": "Hey everyone, how is it going?",
+      "new_context": "Create a ticket for this.",
+      "expected": {
+        "search_existing": false,
+        "suggest_new_task": false
+      },
+      "observed": {
+        "search_existing": 0.11,
+        "suggest_new_task": 0.22
+      }
+    }
+  ]
+}

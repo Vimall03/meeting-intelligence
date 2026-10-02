@@ -3,11 +3,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.routes.google_drive import router as google_drive_router
+from app.api.routes.atlassian import router as atlassian_router
 from app.api.routes.health import router as health_router
 from app.api.routes.transcription import router as transcription_router
 from app.api.routes.meeting_stream import router as meeting_stream_router
 from app.core.config import settings
 from app.services.google_drive_service import GoogleDriveService, GoogleDriveSettings
+from app.services.atlassian_service import AtlassianService, AtlassianSettings
 
 
 google_drive_service = GoogleDriveService(
@@ -21,6 +23,17 @@ google_drive_service = GoogleDriveService(
         timeout_seconds=settings.google_drive_timeout_seconds,
     )
 )
+atlassian_service = AtlassianService(
+    AtlassianSettings(
+        client_id=settings.atlassian_client_id,
+        client_secret=settings.atlassian_client_secret,
+        redirect_uri=settings.atlassian_redirect_uri,
+        oauth_state_secret=settings.atlassian_oauth_state_secret,
+        token_path=settings.atlassian_token_path,
+        site_url=settings.atlassian_site_url,
+        timeout_seconds=settings.atlassian_timeout_seconds,
+    )
+)
 
 
 @asynccontextmanager
@@ -29,6 +42,7 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         await google_drive_service.close()
+        await atlassian_service.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -37,5 +51,7 @@ app.include_router(health_router)
 app.include_router(transcription_router)
 app.include_router(meeting_stream_router)
 app.include_router(google_drive_router)
+app.include_router(atlassian_router)
 
 app.state.google_drive = google_drive_service
+app.state.atlassian = atlassian_service

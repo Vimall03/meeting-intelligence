@@ -126,25 +126,32 @@ class EventServiceTests(unittest.TestCase):
         service.start_pending(
             _task_decision(0.9),
             recent_context="recent",
-            triggering_context="Done.",
+            triggering_context="Investigate the database error.",
             now=0.0,
         )
 
         again = service.start_pending(
             _task_decision(0.9),
             recent_context="recent",
-            triggering_context="Also done.",
+            triggering_context="Investigate the database error.",
             now=30.0,
         )
         later = service.start_pending(
             _task_decision(0.9),
             recent_context="recent",
-            triggering_context="Also done.",
+            triggering_context="Investigate the database error.",
             now=200.0,
         )
 
         self.assertEqual(again, [])
         self.assertEqual(len(later), 1)
+
+    def test_distinct_tasks_are_not_suppressed_for_ninety_seconds(self) -> None:
+        service = EventService(search_threshold=.75, task_threshold=.75, dedupe_window_seconds=90)
+        first = service.start_pending(_task_decision(.9), "Database errors.", "Investigate the database error.", 0)
+        second = service.start_pending(_task_decision(.9), "Support needs notes.", "Send rollout notes to support.", 6)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
 
     def test_new_search_topic_is_not_suppressed_by_previous_search_cooldown(self) -> None:
         service = EventService(
@@ -303,14 +310,87 @@ class EventServiceTests(unittest.TestCase):
         )
         service.start_pending(_search_decision(0.8), "recent", "Find it.", now=0.0)
 
-        first = service.start_pending(_search_decision(0.8), "recent", "A.", now=3.0)
-        second = service.start_pending(_search_decision(0.8), "recent", "B.", now=6.0)
-        third = service.start_pending(_search_decision(0.8), "recent", "C.", now=9.0)
+        [first] = service.start_pending(_search_decision(0.8), "recent", "A.", now=3.0)
+        [second] = service.start_pending(_search_decision(0.8), "recent", "B.", now=6.0)
 
-        self.assertEqual(len(first), 1)
-        self.assertEqual(len(second), 1)
-        self.assertEqual(len(third), 1)
-        self.assertFalse(third[0].is_refinement)
+        self.assertTrue(first.is_refinement)
+        self.assertFalse(second.is_refinement)
+        self.assertTrue(second.is_topic_check)
+
+    def _frozen_maturity_session(self) -> EventService:
+        service = EventService(
+            search_threshold=0.75, task_threshold=0.75, dedupe_window_seconds=90.0
+        )
+        service.start_pending(
+            _search_decision(0.78), "recent", "The flowchart showing maturity.", now=0.0
+        )
+        self.assertTrue(
+            service.accept_search_terms(
+                ["flowchart showing maturity"],
+                ["flowchart showing maturity", "maturity"],
+                is_refinement=False,
+                now=0.0,
+            )
+        )
+        [refined] = service.start_pending(
+            _search_decision(0.79), "recent", "The maturity flowchart.", now=3.0
+        )
+        self.assertTrue(refined.is_refinement)
+        self.assertTrue(
+            service.accept_search_terms(
+                ["maturity flowchart diagram"],
+                ["maturity flowchart diagram"],
+                is_refinement=True,
+                now=3.0,
+            )
+        )
+        return service
+
+    def test_refinement_limit_freezes_same_topic(self) -> None:
+        service = self._frozen_maturity_session()
+
+        now = 6.0
+        for primary in (["maturity page"], ["updates for the charts"]):
+            [event] = service.start_pending(
+                _search_decision(0.88), "recent", "Look at that.", now=now
+            )
+            self.assertTrue(event.is_topic_check)
+            self.assertFalse(
+                service.accept_search_terms(
+                    primary, primary, is_refinement=False, now=now, is_topic_check=True
+                )
+            )
+            self.assertEqual(
+                service.last_search_terms_suppression_reason, "search_topic_frozen"
+            )
+            # Continued discussion keeps the topic frozen past the session window.
+            now += 15.0
+
+    def test_refinement_limit_allows_materially_new_topic(self) -> None:
+        service = self._frozen_maturity_session()
+
+        [event] = service.start_pending(
+            _search_decision(0.85),
+            "recent",
+            "Can we look at the laptop invoice?",
+            now=6.0,
+        )
+        self.assertTrue(event.is_topic_check)
+        self.assertTrue(
+            service.accept_search_terms(
+                ["laptop invoice"],
+                ["laptop invoice"],
+                is_refinement=False,
+                now=6.0,
+                is_topic_check=True,
+            )
+        )
+
+        # The new topic gets its own refinement budget.
+        [refined] = service.start_pending(
+            _search_decision(0.8), "recent", "The Dell one.", now=9.0
+        )
+        self.assertTrue(refined.is_refinement)
 
     def test_refinement_without_new_primary_terms_skips_search(self) -> None:
         service = EventService(
