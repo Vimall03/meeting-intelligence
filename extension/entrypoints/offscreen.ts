@@ -1,5 +1,5 @@
 import { AUDIO_MIME_TYPE, AUDIO_WINDOW_MS, MEETING_SOCKET_URL } from '../lib/config';
-import type { JevAction, RelatedDriveFile } from '../lib/types';
+import { isTimelineSnapshot } from '../lib/timeline';
 
 let recorder: MediaRecorder | undefined;
 let tabStream: MediaStream | undefined;
@@ -12,14 +12,14 @@ let microphoneSource: MediaStreamAudioSourceNode | undefined;
 let tabGain: GainNode | undefined;
 let microphoneGain: GainNode | undefined;
 let recordingWindowTimer: ReturnType<typeof setTimeout> | undefined;
+let audioHealthTimer: ReturnType<typeof setInterval> | undefined;
 let stopping = false;
 let captureGeneration = 0;
+let captureSessionId: string | undefined;
 let startPending = false;
 
 function assertCurrent(generation: number) {
   if (generation !== captureGeneration || stopping) {
-    tabStream?.getTracks().forEach((track) => track.stop());
-    microphoneStream?.getTracks().forEach((track) => track.stop());
     throw new DOMException('Capture was canceled.', 'AbortError');
   }
 }
@@ -34,7 +34,7 @@ function startRecordingWindow(activeRecorder: MediaRecorder) {
   }, AUDIO_WINDOW_MS);
 }
 
-async function start(streamId: string) {
+async function start(streamId: string, sessionId: string) {
   // A tabCapture stream ID can be consumed in this extension offscreen page.
   // Request audio alone: no tab video or display-capture permission is used.
   const selection = navigator.mediaDevices.getUserMedia({
@@ -50,10 +50,18 @@ async function start(streamId: string) {
   const cleanup = stop();
   const generation = ++captureGeneration;
   await cleanup;
-  if (generation !== captureGeneration) throw new DOMException('Capture was canceled.', 'AbortError');
+  if (generation !== captureGeneration) {
+    void selection.then((stream) => stream.getTracks().forEach((track) => track.stop()));
+    throw new DOMException('Capture was canceled.', 'AbortError');
+  }
   stopping = false;
-  tabStream = await selection;
-  assertCurrent(generation);
+  captureSessionId = sessionId;
+  const selectedTab = await selection;
+  if (generation !== captureGeneration || stopping) {
+    selectedTab.getTracks().forEach((track) => track.stop());
+    throw new DOMException('Capture was canceled.', 'AbortError');
+  }
+  tabStream = selectedTab;
   if (tabStream.getAudioTracks().length === 0) {
     throw new Error('Brave did not provide audio from this Meet tab.');
   }
@@ -65,7 +73,7 @@ async function start(streamId: string) {
   // speaker's voice is not played back into the tab, so capture the mic
   // separately and mix both sources into one WebM/Opus stream.
   try {
-    microphoneStream = await navigator.mediaDevices.getUserMedia({
+    const selectedMicrophone = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
@@ -73,7 +81,11 @@ async function start(streamId: string) {
       },
       video: false,
     });
-    assertCurrent(generation);
+    if (generation !== captureGeneration || stopping) {
+      selectedMicrophone.getTracks().forEach((track) => track.stop());
+      throw new DOMException('Capture was canceled.', 'AbortError');
+    }
+    microphoneStream = selectedMicrophone;
     await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: true }).catch(() => undefined);
     assertCurrent(generation);
   } catch (error) {
@@ -92,6 +104,7 @@ async function start(streamId: string) {
     throw new Error('This browser does not support WebM/Opus audio capture.');
   }
 
+  notify({ captureStatus: 'connecting', backendConnected: false, timeline: undefined, error: undefined });
   const sessionSocket = new WebSocket(MEETING_SOCKET_URL);
   socket = sessionSocket;
   sessionSocket.onopen = () => {
@@ -112,31 +125,15 @@ async function start(streamId: string) {
   sessionSocket.onmessage = (event) => {
     if (socket !== sessionSocket || stopping || typeof event.data !== 'string') return;
     try {
-      const message = JSON.parse(event.data) as {
-        type?: string;
-        decision?: string;
-        confidence?: number;
-        query?: string;
-        files?: RelatedDriveFile[];
-        error?: string;
-      };
-      if (message.type === 'RELATED_FILES' && Array.isArray(message.files)) {
-        notify({
-          relatedFiles: message.files.filter(isRelatedDriveFile),
-          relatedFilesQuery: message.query ?? '',
-          relatedFilesError: message.error,
+      const message: unknown = JSON.parse(event.data);
+      if (isTimelineSnapshot(message)) notify({ timeline: message });
+      if (typeof message === 'object' && message !== null && 'type' in message && message.type === 'transcription_state') {
+        const update = message as { transcript?: unknown; warning?: unknown };
+        if (typeof update.transcript === 'string') notify({
+          transcript: update.transcript.slice(-3000),
+          transcriptionWarning: typeof update.warning === 'string' ? update.warning : undefined,
         });
-        return;
       }
-      const actionable = message.decision === 'SEARCH_EXISTING_WORK' || message.decision === 'SUGGEST_NEW_TASK';
-      if (message.type !== 'jev_decision' || !actionable || typeof message.confidence !== 'number') return;
-      notify({
-        jevDecision: {
-          action: message.decision as JevAction,
-          confidence: Math.max(0, Math.min(1, message.confidence)),
-          receivedAt: Date.now(),
-        },
-      });
     } catch {
       // Ignore malformed or unrelated backend messages.
     }
@@ -161,6 +158,75 @@ async function start(streamId: string) {
   microphoneSource.connect(microphoneGain);
   microphoneGain.connect(mix);
   recordingStream = mix.stream;
+  const sessionContext = audioContext;
+  const microphoneAnalyser = sessionContext.createAnalyser();
+  const tabAnalyser = sessionContext.createAnalyser();
+  microphoneAnalyser.fftSize = tabAnalyser.fftSize = 1024;
+  microphoneSource.connect(microphoneAnalyser);
+  tabSource.connect(tabAnalyser);
+  const samples = new Float32Array(1024);
+  const level = (analyser: AnalyserNode) => {
+    analyser.getFloatTimeDomainData(samples);
+    return Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length);
+  };
+  let quietSince = Date.now();
+  let recoveringMicrophone = false;
+  const recoverMicrophone = async () => {
+    if (recoveringMicrophone || stopping || generation !== captureGeneration) return;
+    recoveringMicrophone = true;
+    notify({ audioWarning: 'Microphone disconnected. Reconnecting…' });
+    try {
+      const replacement = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false,
+      });
+      if (stopping || generation !== captureGeneration) {
+        replacement.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      microphoneSource?.disconnect();
+      microphoneStream?.getTracks().forEach((track) => track.stop());
+      microphoneStream = replacement;
+      microphoneSource = sessionContext.createMediaStreamSource(replacement);
+      microphoneSource.connect(microphoneGain!);
+      microphoneSource.connect(microphoneAnalyser);
+      quietSince = Date.now();
+      notify({ audioWarning: undefined });
+    } catch (error) {
+      if (stopping || generation !== captureGeneration) return;
+      if (error instanceof Error && ['NotAllowedError', 'SecurityError'].includes(error.name)) {
+        await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: false }).catch(() => undefined);
+      }
+      notify({ captureStatus: 'error', backendConnected: false, error: 'The microphone disconnected and could not be reopened. Check your input device, then restart capture.' });
+      void stop();
+    } finally {
+      recoveringMicrophone = false;
+    }
+  };
+  // A recording can continue producing silent WebM windows when its input
+  // ends or Web Audio is suspended. Check the actual sources, not just recorder.state.
+  audioHealthTimer = setInterval(() => {
+    if (stopping || generation !== captureGeneration) return;
+    if (tabStream?.getAudioTracks().every((track) => track.readyState === 'ended')) {
+      notify({ captureStatus: 'error', backendConnected: false, error: 'Meet tab audio ended. Restart capture in the active call.' });
+      void stop();
+      return;
+    }
+    if (microphoneStream?.getAudioTracks().every((track) => track.readyState === 'ended')) {
+      void recoverMicrophone();
+      return;
+    }
+    if (sessionContext.state !== 'running') {
+      void sessionContext.resume().catch(() => undefined);
+      notify({ audioWarning: 'Audio input paused. Trying to resume…' });
+      return;
+    }
+    if (recoveringMicrophone) return;
+    const hasAudio = level(microphoneAnalyser) > 0.001 || level(tabAnalyser) > 0.001;
+    if (hasAudio) quietSince = Date.now();
+    const muted = microphoneStream?.getAudioTracks().some((track) => track.muted || !track.enabled);
+    notify({ audioWarning: muted ? 'Your microphone is not delivering audio. Check your input device.'
+      : Date.now() - quietSince > 15000 ? 'No audio detected. If you are speaking, check the microphone selected in Brave.' : undefined });
+  }, 3000);
 
   const activeRecorder = new MediaRecorder(recordingStream, { mimeType: AUDIO_MIME_TYPE });
   recorder = activeRecorder;
@@ -178,17 +244,6 @@ async function start(streamId: string) {
     void stop();
   };
   startRecordingWindow(activeRecorder);
-  notify({ captureStatus: 'connecting', backendConnected: false, jevDecision: undefined, relatedFiles: undefined, relatedFilesQuery: undefined, relatedFilesError: undefined, error: undefined });
-}
-
-function isRelatedDriveFile(value: unknown): value is RelatedDriveFile {
-  if (!value || typeof value !== 'object') return false;
-  const file = value as Partial<RelatedDriveFile>;
-  return typeof file.id === 'string'
-    && typeof file.name === 'string'
-    && typeof file.mime_type === 'string'
-    && Array.isArray(file.matched_terms)
-    && typeof file.relevance_score === 'number';
 }
 
 async function stop() {
@@ -196,6 +251,8 @@ async function stop() {
   stopping = true;
   if (recordingWindowTimer) clearTimeout(recordingWindowTimer);
   recordingWindowTimer = undefined;
+  if (audioHealthTimer) clearInterval(audioHealthTimer);
+  audioHealthTimer = undefined;
   const activeRecorder = recorder;
   recorder = undefined;
 
@@ -242,16 +299,16 @@ async function stop() {
 }
 
 function notify(state: Record<string, unknown>) {
-  chrome.runtime.sendMessage({ type: 'CAPTURE_STATE', state }).catch(() => undefined);
+  chrome.runtime.sendMessage({ type: 'CAPTURE_STATE', captureSessionId, state }).catch(() => undefined);
 }
 
-chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string }, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string; captureSessionId?: string }, _sender, sendResponse) => {
   if (message.type === 'GET_OFFSCREEN_STATUS') {
     sendResponse({ active: !stopping && tabStream?.active === true });
     return false;
   }
   if (message.type === 'START_OFFSCREEN') {
-    if (!message.streamId) {
+    if (!message.streamId || !message.captureSessionId) {
       sendResponse({ ok: false, error: 'Missing tab audio authorization.' });
       return false;
     }
@@ -260,7 +317,7 @@ chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string
       return false;
     }
     startPending = true;
-    start(message.streamId)
+    start(message.streamId, message.captureSessionId)
       .then(() => sendResponse({ ok: true }))
       .catch(async (error: unknown) => {
         const description = describeCaptureError(error);

@@ -1,13 +1,8 @@
 import type { MeetingStatus } from './types';
-
-const MEET_HOST = 'meet.google.com';
-// Meet room codes are not always the legacy 3-4-3 shape (for example,
-// /isi-jcs-wf). Require three short alphanumeric groups so the homepage and
-// unrelated Meet routes remain excluded while current room-code variants work.
-const MEETING_PATH = /^\/[a-z0-9]{2,4}-[a-z0-9]{2,4}-[a-z0-9]{2,4}(?:\/)?$/i;
+import { meetingIdFromUrl } from './meeting-session';
 
 export function detectMeeting(): MeetingStatus {
-  if (window.location.hostname !== MEET_HOST || !MEETING_PATH.test(window.location.pathname)) {
+  if (!meetingIdFromUrl(window.location.href)) {
     return 'not-in-meeting';
   }
 

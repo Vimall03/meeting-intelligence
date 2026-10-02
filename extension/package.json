@@ -7,7 +7,8 @@
     "dev": "wxt",
     "build": "wxt build",
     "zip": "wxt zip",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:session": "node --experimental-strip-types --test tests/*.test.mjs"
   },
   "dependencies": {
     "@wxt-dev/module-react": "^1.0.2",

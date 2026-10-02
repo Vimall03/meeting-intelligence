@@ -5,6 +5,10 @@ export const GOOGLE_DRIVE_STATUS_URL = `${BACKEND_HTTP_BASE_URL}/api/integration
 export const GOOGLE_DRIVE_AUTH_START_URL = `${BACKEND_HTTP_BASE_URL}/api/integrations/google-drive/auth/start`;
 export const GOOGLE_DRIVE_AUTH_TAB_KEY = 'googleDriveOAuthPending';
 export const GOOGLE_DRIVE_AUTH_RESULT_KEY = 'googleDriveOAuthResult';
+export const ATLASSIAN_STATUS_URL = `${BACKEND_HTTP_BASE_URL}/api/integrations/atlassian/status`;
+export const ATLASSIAN_AUTH_START_URL = `${BACKEND_HTTP_BASE_URL}/api/integrations/atlassian/auth/start`;
+export const ATLASSIAN_JIRA_PROJECTS_URL = `${BACKEND_HTTP_BASE_URL}/api/integrations/atlassian/jira/projects`;
+export const ATLASSIAN_JIRA_TASKS_URL = `${BACKEND_HTTP_BASE_URL}/api/integrations/atlassian/jira/tasks`;
 
 export function isGoogleDriveCallbackUrl(url: string, redirectUri: string) {
   try {
