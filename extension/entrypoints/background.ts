@@ -11,6 +11,7 @@ import {
 const OFFSCREEN_URL = 'offscreen-page.html';
 const meetingStatuses = new Map<number, ExtensionState['meetingStatus']>();
 const meetingIds = new Map<number, string>();
+const meetingMicrophoneProblems = new Map<number, boolean>();
 const processingDriveOAuthTabs = new Set<number>();
 let state: ExtensionState = {
   meetingStatus: 'unknown',
@@ -27,6 +28,19 @@ function initializeState() {
     const getSession = chrome.storage.session.get.bind(chrome.storage.session) as unknown as (key: string) => Promise<{ state?: ExtensionState }>;
     initialization = getSession('state').then(async ({ state: savedState }) => {
       if (savedState) state = savedState;
+      // A stopped capture error describes a previous offscreen document. Do
+      // not keep presenting it after an extension reload as if it just happened.
+      if (state.captureStatus === 'error') {
+        state = {
+          ...state,
+          captureStatus: 'idle',
+          captureTabId: undefined,
+          captureSessionId: undefined,
+          backendConnected: false,
+          error: undefined,
+        };
+        await chrome.storage.session.set({ state });
+      }
       // Older builds stored an unscoped timeline. It cannot be safely shown
       // in a later meeting after the service worker restarts.
       if (state.timeline && !state.timelineOwner) state = { ...state, timeline: undefined };
@@ -81,8 +95,14 @@ function broadcast() {
   return broadcastOperation;
 }
 
-function recordMeetingStatus(tabId: number, status: ExtensionState['meetingStatus'], meetingId?: string): boolean {
+function recordMeetingStatus(
+  tabId: number,
+  status: ExtensionState['meetingStatus'],
+  meetingId?: string,
+  meetMicrophoneProblem = false,
+): boolean {
   meetingStatuses.set(tabId, status);
+  meetingMicrophoneProblems.set(tabId, meetMicrophoneProblem);
   if (status === 'in-meeting' && meetingId) meetingIds.set(tabId, meetingId);
   else meetingIds.delete(tabId);
   const ended = didMeetingEnd(state.timelineOwner, tabId, status, meetingId);
@@ -92,8 +112,10 @@ function recordMeetingStatus(tabId: number, status: ExtensionState['meetingStatu
 
 async function checkMeetingTab(tabId: number) {
   try {
-    const response = await chrome.tabs.sendMessage(tabId, { type: 'GET_MEETING_STATUS' }) as { status?: ExtensionState['meetingStatus']; meetingId?: string };
-    if (response?.status) recordMeetingStatus(tabId, response.status, response.meetingId);
+    const response = await chrome.tabs.sendMessage(tabId, { type: 'GET_MEETING_STATUS' }) as {
+      status?: ExtensionState['meetingStatus']; meetingId?: string; meetMicrophoneProblem?: boolean;
+    };
+    if (response?.status) recordMeetingStatus(tabId, response.status, response.meetingId, response.meetMicrophoneProblem);
   } catch { /* The caller receives the active-Meet error below. */ }
   return meetingStatuses.get(tabId) === 'in-meeting';
 }
@@ -202,7 +224,7 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
   await initializeState();
   if (message.type === 'MEETING_STATUS') {
     const tabId = sender.tab?.id ?? message.tabId;
-    const ended = recordMeetingStatus(tabId, message.status, message.meetingId);
+    const ended = recordMeetingStatus(tabId, message.status, message.meetingId, message.meetMicrophoneProblem);
     if (state.captureStatus === 'idle' || state.meetingTabId === tabId) {
       state = { ...state, meetingStatus: message.status, meetingTabId: tabId };
     }
@@ -214,6 +236,7 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
     return tabId === undefined ? state : {
       ...state,
       meetingStatus: meetingStatuses.get(tabId) ?? 'unknown',
+      meetMicrophoneProblem: meetingMicrophoneProblems.get(tabId) ?? false,
       meetingTabId: tabId,
       timeline: isTimelineForMeeting(state.timelineOwner, tabId, meetingIds.get(tabId), meetingStatuses.get(tabId) ?? 'unknown') ? state.timeline : undefined,
     };

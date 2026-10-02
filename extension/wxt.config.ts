@@ -5,7 +5,7 @@ export default defineConfig({
   manifest: {
     name: 'Meeting Intelligence',
     description: 'Capture Google Meet and microphone audio and stream it to a local backend.',
-    version: '0.1.0',
+    version: '0.1.1',
     permissions: ['activeTab', 'tabCapture', 'offscreen', 'storage', 'sidePanel'],
     host_permissions: ['https://meet.google.com/*', 'http://localhost:8000/*'],
     action: {

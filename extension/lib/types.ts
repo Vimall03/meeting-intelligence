@@ -46,6 +46,7 @@ export interface TimelineSnapshot {
 
 export interface ExtensionState {
   meetingStatus: MeetingStatus;
+  meetMicrophoneProblem?: boolean;
   meetingTabId?: number;
   captureTabId?: number;
   captureSessionId?: string;
@@ -61,7 +62,7 @@ export interface ExtensionState {
 }
 
 export type ExtensionMessage =
-  | { type: 'MEETING_STATUS'; status: MeetingStatus; meetingId?: string; tabId: number }
+  | { type: 'MEETING_STATUS'; status: MeetingStatus; meetingId?: string; meetMicrophoneProblem?: boolean; tabId: number }
   | { type: 'GET_MEETING_STATUS' }
   | { type: 'GET_STATE'; tabId?: number }
   | { type: 'MIC_PERMISSION_RESULT'; granted: boolean; errorName?: string; errorMessage?: string }

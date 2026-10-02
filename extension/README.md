@@ -39,3 +39,8 @@ not infer that silence is a fault; they explain what to check if you are speakin
 A side-panel permission query reporting `prompt` does not erase a previously
 successful grant. Actual capture denial or explicit browser denial clears it;
 a busy or missing device does not.
+
+The Meet content script also detects Meet's own “Microphone problem” control.
+The side panel then explains that the site permission must be allowed, while
+capture and pending backend work continue. The panel displays the extension
+version so an unpacked-extension reload can be verified directly.

@@ -205,6 +205,7 @@ type SidePanelCloseApi = {
 };
 
 export default function App() {
+  const extensionVersion = chrome.runtime.getManifest().version;
   const [state, setState] = useState(initialState);
   const [activeTab, setActiveTab] = useState<chrome.tabs.Tab>();
   const [microphone, setMicrophone] = useState<MicrophonePermission>('checking');
@@ -684,7 +685,7 @@ export default function App() {
     <main className="shell">
       <header className="header">
         <div className="brand-mark" aria-hidden="true">M</div>
-        <div className="brand-copy"><h1>Meeting Intelligence</h1><p>Real-time meeting audio</p></div>
+        <div className="brand-copy"><h1>Meeting Intelligence</h1><p>Real-time meeting audio · v{extensionVersion}</p></div>
         <span className={`live-indicator ${running ? 'is-live' : ''}`} aria-label={running ? 'Capture active' : 'Capture inactive'} />
         {running && (
           <button
@@ -714,6 +715,11 @@ export default function App() {
       {state.captureStatus === 'error' && state.error
         ? <div className="notice error" role="alert">{state.error}</div>
         : notice && <div className={`notice ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.text}</div>}
+      {state.meetMicrophoneProblem && (
+        <div className="notice error" role="alert">
+          Google Meet cannot access its microphone. Click Meet’s microphone warning and allow the selected input device. Meeting Intelligence will keep Meet audio and pending searches running.
+        </div>
+      )}
 
       {running && (
         <div className="actions">
