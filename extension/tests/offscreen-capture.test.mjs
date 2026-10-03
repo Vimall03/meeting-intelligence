@@ -93,6 +93,23 @@ test('capture resumes a suspended mixer and replaces a disconnected microphone',
   assert.equal(h.replacement.getTracks()[0].readyState, 'ended');
 });
 
+test('capture replaces a microphone that becomes muted while its track remains live', async () => {
+  const h = harness();
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
+  const staleTrack = h.microphone.getTracks()[0];
+  staleTrack.muted = true;
+
+  h.health();
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(staleTrack.readyState, 'ended');
+  assert.equal(h.replacement.getTracks()[0].readyState, 'live');
+  assert.equal(h.messages.at(-1).state.audioWarning, undefined);
+  h.window();
+  assert.equal(h.sockets[0].sent.length, 1);
+  await h.send({ type: 'STOP_OFFSCREEN' });
+});
+
 test('failed microphone recovery keeps the websocket and Meet capture alive', async () => {
   const h = harness({ failReplacement: true });
   await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });

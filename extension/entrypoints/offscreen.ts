@@ -231,7 +231,10 @@ async function start(streamId: string, sessionId: string) {
       return;
     }
     const microphoneTracks = microphoneStream?.getAudioTracks() ?? [];
-    if (microphoneTracks.length === 0 || microphoneTracks.every((track) => track.readyState === 'ended')) {
+    const microphoneUnavailable = microphoneStream?.active !== true || microphoneTracks.length === 0 || microphoneTracks.every(
+      (track) => track.readyState === 'ended' || track.muted || !track.enabled,
+    );
+    if (microphoneUnavailable) {
       void recoverMicrophone();
       return;
     }
@@ -243,9 +246,9 @@ async function start(streamId: string, sessionId: string) {
     if (recoveringMicrophone) return;
     const hasAudio = level(microphoneAnalyser) > 0.001 || level(tabAnalyser) > 0.001;
     if (hasAudio) quietSince = Date.now();
-    const muted = microphoneTracks.some((track) => track.muted || !track.enabled);
-    notify({ audioWarning: muted ? 'Your microphone is not delivering audio. Check your input device.'
-      : Date.now() - quietSince > 15000 ? 'No audio detected. If you are speaking, check the microphone selected in Brave.' : undefined });
+    notify({ audioWarning: Date.now() - quietSince > 15000
+      ? 'No audio detected. If you are speaking, check the microphone selected in Brave.'
+      : undefined });
   }, 3000);
 
   const activeRecorder = new MediaRecorder(recordingStream, { mimeType: AUDIO_MIME_TYPE });
