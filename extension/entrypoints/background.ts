@@ -1,6 +1,7 @@
 import type { ExtensionMessage, ExtensionState } from '../lib/types';
 import { didMeetingEnd, isTimelineForMeeting, meetingIdFromUrl } from '../lib/meeting-session';
 import { MICROPHONE_PERMISSION_KEY, isMicrophonePermissionError } from '../lib/microphone-permission';
+import { probeWithContentScriptRecovery } from '../lib/content-script-recovery';
 import {
   GOOGLE_DRIVE_AUTH_RESULT_KEY,
   GOOGLE_DRIVE_AUTH_TAB_KEY,
@@ -111,18 +112,28 @@ function recordMeetingStatus(
 }
 
 async function checkMeetingTab(tabId: number) {
+  let connected = false;
   try {
-    const response = await chrome.tabs.sendMessage(tabId, { type: 'GET_MEETING_STATUS' }) as {
+    const response = await probeWithContentScriptRecovery({
+      probe: () => chrome.tabs.sendMessage(tabId, { type: 'GET_MEETING_STATUS' }) as Promise<{
+        status?: ExtensionState['meetingStatus']; meetingId?: string; meetMicrophoneProblem?: boolean;
+      }>,
+      inject: async (files) => {
+        await chrome.scripting.executeScript({ target: { tabId }, files });
+      },
+      manifest: chrome.runtime.getManifest(),
+    }) as {
       status?: ExtensionState['meetingStatus']; meetingId?: string; meetMicrophoneProblem?: boolean;
     };
+    connected = true;
     if (response?.status) recordMeetingStatus(tabId, response.status, response.meetingId, response.meetMicrophoneProblem);
   } catch { /* The caller receives the active-Meet error below. */ }
-  return meetingStatuses.get(tabId) === 'in-meeting';
+  return { connected, inMeeting: connected && meetingStatuses.get(tabId) === 'in-meeting' };
 }
 
 async function prepareCapture(tabId: number) {
   await initializeState();
-  if (!await checkMeetingTab(tabId)) {
+  if (!(await checkMeetingTab(tabId)).inMeeting) {
     state = { ...state, captureStatus: 'error', error: 'Open an active Google Meet call first.' };
     await broadcast();
     return { ok: false, error: state.error };
@@ -156,7 +167,7 @@ function startCapture(tabId: number) {
       return { ok: false, error: 'A capture is already running.', state };
     }
     await ensureOffscreen();
-    if (!await checkMeetingTab(tabId)) throw new Error('Open an active Google Meet call first.');
+    if (!(await checkMeetingTab(tabId)).inMeeting) throw new Error('Open an active Google Meet call first.');
     const meetingId = meetingIds.get(tabId);
     if (!meetingId) throw new Error('Could not identify this Meet room. Refresh the Meet tab and try again.');
     const captureSessionId = crypto.randomUUID();
@@ -239,6 +250,14 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
       meetMicrophoneProblem: meetingMicrophoneProblems.get(tabId) ?? false,
       meetingTabId: tabId,
       timeline: isTimelineForMeeting(state.timelineOwner, tabId, meetingIds.get(tabId), meetingStatuses.get(tabId) ?? 'unknown') ? state.timeline : undefined,
+    };
+  } else if (message.type === 'CHECK_MEETING_TAB') {
+    const result = await checkMeetingTab(message.tabId);
+    return {
+      status: meetingStatuses.get(message.tabId) ?? 'unknown',
+      meetingId: meetingIds.get(message.tabId),
+      meetMicrophoneProblem: meetingMicrophoneProblems.get(message.tabId) ?? false,
+      contentScriptMissing: !result.connected,
     };
   } else if (message.type === 'PREPARE_CAPTURE') {
     return prepareCapture(sender.tab?.id ?? message.tabId);

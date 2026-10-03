@@ -64,6 +64,7 @@ export interface ExtensionState {
 export type ExtensionMessage =
   | { type: 'MEETING_STATUS'; status: MeetingStatus; meetingId?: string; meetMicrophoneProblem?: boolean; tabId: number }
   | { type: 'GET_MEETING_STATUS' }
+  | { type: 'CHECK_MEETING_TAB'; tabId: number }
   | { type: 'GET_STATE'; tabId?: number }
   | { type: 'MIC_PERMISSION_RESULT'; granted: boolean; errorName?: string; errorMessage?: string }
   | { type: 'MICROPHONE_PERMISSION_STATUS'; granted: boolean }

@@ -5,7 +5,7 @@ import type { ExtensionMessage } from '../lib/types';
 export default defineContentScript({
   matches: ['https://meet.google.com/*'],
   runAt: 'document_idle',
-  main() {
+  main(ctx) {
     const report = async () => {
       const status = detectMeeting();
       const meetingId = status === 'in-meeting' ? meetingIdFromUrl(window.location.href) : undefined;
@@ -14,14 +14,29 @@ export default defineContentScript({
       const message: ExtensionMessage = {
         type: 'MEETING_STATUS', status, meetingId, meetMicrophoneProblem, tabId: -1,
       };
-      await chrome.runtime.sendMessage(message).catch(() => undefined);
+      if (ctx.isValid) {
+        try {
+          await chrome.runtime.sendMessage(message);
+        } catch {
+          // Reloading an unpacked extension invalidates the old page context.
+          // The background will inject the current script on its next probe.
+        }
+      }
       return { status, meetingId, meetMicrophoneProblem };
     };
 
-    chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
+    const onMessage = (message: ExtensionMessage, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void) => {
       if (message.type !== 'GET_MEETING_STATUS') return false;
       void report().then(sendResponse);
       return true;
+    };
+    chrome.runtime.onMessage.addListener(onMessage);
+    ctx.onInvalidated(() => {
+      try {
+        chrome.runtime.onMessage.removeListener(onMessage);
+      } catch {
+        // The runtime API itself is unavailable after an unpacked reload.
+      }
     });
 
     void report();
@@ -29,9 +44,10 @@ export default defineContentScript({
     const observer = new MutationObserver(() => {
       if (scheduled) return;
       scheduled = true;
-      window.setTimeout(() => { scheduled = false; void report(); }, 250);
+      ctx.setTimeout(() => { scheduled = false; void report(); }, 250);
     });
     observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
-    window.setInterval(() => { void report(); }, 3_000);
+    ctx.onInvalidated(() => observer.disconnect());
+    ctx.setInterval(() => { void report(); }, 3_000);
   },
 });

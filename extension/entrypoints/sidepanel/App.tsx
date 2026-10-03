@@ -263,8 +263,11 @@ export default function App() {
       let contentScriptMissing = false;
       if (isMeetTab(tab)) {
         try {
-          const result = await chrome.tabs.sendMessage(tab.id, { type: 'GET_MEETING_STATUS' }) as { status?: MeetingStatus };
+          const result = await chrome.runtime.sendMessage({ type: 'CHECK_MEETING_TAB', tabId: tab.id }) as {
+            status?: MeetingStatus; contentScriptMissing?: boolean;
+          };
           meetingStatus = result?.status ?? 'unknown';
+          contentScriptMissing = result?.contentScriptMissing === true;
         } catch {
           meetingStatus = 'unknown';
           contentScriptMissing = true;
@@ -281,7 +284,7 @@ export default function App() {
       });
       const tabChanged = previousTabId !== tab.id;
       if (contentScriptMissing) {
-        setNotice({ tone: 'info', text: 'Refresh this Meet tab once to connect the extension controls.' });
+        setNotice({ tone: 'error', text: 'Could not reconnect the extension to this Meet tab. Refresh the Meet tab once, then retry.' });
       } else if (tabChanged || contentScriptMissingRef.current) {
         setNotice(undefined);
       }
