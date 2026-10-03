@@ -687,7 +687,7 @@ export default function App() {
   return (
     <main className="shell">
       <header className="header">
-        <div className="brand-mark" aria-hidden="true">M</div>
+        <img className="brand-mark" src="/meeting-intelligence-logo.png" alt="" aria-hidden="true" />
         <div className="brand-copy"><h1>Meeting Intelligence</h1><p>Real-time meeting audio · v{extensionVersion}</p></div>
         <span className={`live-indicator ${running ? 'is-live' : ''}`} aria-label={running ? 'Capture active' : 'Capture inactive'} />
         {running && (
