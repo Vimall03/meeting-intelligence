@@ -13,3 +13,9 @@ wheels/
 .env
 backend/.data/
 samples/*
+
+# Local caches and extension archives
+.DS_Store
+.pytest_cache/
+*.zip
+*.crx

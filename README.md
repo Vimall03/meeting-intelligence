@@ -1,9 +1,8 @@
-## Resources I used so far
+# Meeting Intelligence
 
-1. https://docs.astral.sh/uv/getting-started/installation/
-2. https://fastapi.tiangolo.com/
-3. https://github.com/SYSTRAN/faster-whisper/blob/master/README.md?utm_source=chatgpt.com
-4. https://github.com/m-bain/whisperX
+A Google Meet extension that captures meeting audio and your microphone, finds related Drive, Jira, and Confluence content, and drafts Jira tasks for review.
+
+Build the extension with `cd extension` and `npm run build`, then load `extension/.output/chrome-mv3` in Brave as an unpacked extension. See [extension setup](extension/README.md) for microphone permissions and checks.
 
 ## Jev routing
 
@@ -80,7 +79,7 @@ event remains available for clients that have not yet switched to snapshots.
 In the extension side panel, choose **Connect Google Drive** once and approve
 the Google consent screen. The backend keeps the refresh token; the extension
 does not store Google credentials. During capture, matching files appear in the
-**Results timeline** with links that open in Google Drive.
+**Meeting activity** with links that open in Google Drive.
 
 ## Atlassian Cloud search and task creation
 

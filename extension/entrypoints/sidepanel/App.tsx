@@ -39,7 +39,12 @@ async function readGoogleDriveStatus(): Promise<boolean> {
 }
 
 async function readAtlassianStatus(): Promise<{ connected: boolean; configured: boolean; site_url?: string; sources: string[]; can_create_tasks: boolean }> {
-  const response = await fetch(ATLASSIAN_STATUS_URL, { cache: 'no-store' });
+  let response: Response;
+  try {
+    response = await fetch(ATLASSIAN_STATUS_URL, { cache: 'no-store' });
+  } catch {
+    throw new Error('Could not reach the local backend. Start it, then retry.');
+  }
   const payload = await response.json().catch(() => ({})) as {
     connected?: boolean; configured?: boolean; site_url?: string; sources?: string[]; can_create_tasks?: boolean; detail?: { message?: string };
   };
@@ -668,9 +673,9 @@ export default function App() {
   const capturingElsewhere = running && !capturingHere;
   const inMeeting = isMeetTab(activeTab) && state.meetingStatus === 'in-meeting';
   const statusTitle = capturingHere
-    ? state.captureStatus === 'connecting' ? 'Starting your capture' : 'Meeting is being captured'
+    ? state.captureStatus === 'connecting' ? 'Starting your capture' : 'Listening to your meeting'
     : capturingElsewhere ? 'Capture active in another tab'
-      : inMeeting ? 'You’re in a Google Meet call'
+      : inMeeting ? 'Ready to listen'
         : state.meetingStatus === 'unknown' && isMeetTab(activeTab) ? 'Connect this Meet tab'
           : 'Ready when you are';
   const timelineItems = isTimelineForMeeting(
@@ -688,10 +693,9 @@ export default function App() {
     <main className="shell">
       <header className="header">
         <img className="brand-mark" src="/meeting-intelligence-logo.png" alt="" aria-hidden="true" />
-        <div className="brand-copy"><h1>Meeting Intelligence</h1><p>Real-time meeting audio · v{extensionVersion}</p></div>
+        <div className="brand-copy"><h1>Meeting Intelligence</h1><p>Your meeting companion</p></div>
         <span className={`live-indicator ${running ? 'is-live' : ''}`} aria-label={running ? 'Capture active' : 'Capture inactive'} />
-        {running && (
-          <button
+        <button
             className="settings-button"
             type="button"
             aria-label={settingsOpen ? 'Hide settings' : 'Show settings'}
@@ -700,7 +704,6 @@ export default function App() {
             title={settingsOpen ? 'Hide settings' : 'Settings'}
             onClick={() => setSettingsOpen((open) => !open)}
           >⚙</button>
-        )}
         <button className="panel-close" onClick={() => void closePanel()} aria-label="Close Meeting Intelligence panel" title="Close panel">×</button>
       </header>
 
@@ -709,8 +712,8 @@ export default function App() {
         <div className="status-copy">
           <strong>{statusTitle}</strong>
           <span>{running
-            ? state.backendConnected ? 'Connected to your local backend' : 'Connecting to localhost:8000…'
-            : inMeeting ? 'Ready for audio-only capture; no video is requested' : isMeetTab(activeTab) ? 'Join the call to enable capture' : 'Open or join Google Meet to get started'}</span>
+            ? state.backendConnected ? 'Finding useful context and next steps' : 'Connecting…'
+            : inMeeting ? 'Capture Meet audio and your voice' : isMeetTab(activeTab) ? 'Join the call to enable capture' : 'Open or join Google Meet to get started'}</span>
         </div>
       </section>
 
@@ -737,17 +740,24 @@ export default function App() {
         </div>
       )}
 
+      {!running && <div className="actions">
+          <button className="start-button" onClick={startCapture} disabled={busy || !inMeeting || microphone !== 'granted' || readyTabId !== activeTab?.id}>
+            {busy ? 'Starting…' : readyTabId !== activeTab?.id && inMeeting && microphone === 'granted' ? 'Preparing…' : state.captureStatus === 'error' ? 'Retry capture' : 'Start capture'}
+          </button>
+        <p className="action-hint">{!inMeeting ? 'Capture is only available inside an active Meet call.' : microphone === 'checking' ? 'Checking microphone access…' : microphone !== 'granted' ? 'Enable microphone access to continue.' : 'Only Meet tab audio and your microphone will be captured.'}</p>
+      </div>}
+
       <section className="timeline-section" aria-labelledby="timeline-heading">
         <div className="timeline-heading">
           <div>
-            <h2 id="timeline-heading">Results timeline</h2>
-            <p>Newest results first</p>
+            <h2 id="timeline-heading">Meeting activity</h2>
+            <p>Relevant files and next steps</p>
           </div>
           <span className="timeline-count">{timelineItems.length}</span>
         </div>
         <div className="timeline-scroll" ref={timelineScrollRef}>
           {timelineItems.length === 0 ? (
-            <p className="timeline-empty">Search results and task suggestions will appear here during a meeting.</p>
+            <div className="timeline-empty"><span className="empty-symbol" aria-hidden="true">✦</span><strong>{running ? "Listening for useful context" : "A little context goes a long way"}</strong><p>{running ? "Related files and suggested tasks appear here as your meeting unfolds." : "Start capture in a Meet call to find related files and turn next steps into tasks."}</p></div>
           ) : (
             <ol className="timeline-list">
               {timelineItems.map((item) => (
@@ -761,7 +771,6 @@ export default function App() {
                       <>
                         <h3>{item.title}</h3>
                         <p className="timeline-description">{item.description}</p>
-                        <span className="timeline-confidence">{Math.round(item.confidence * 100)}% confidence</span>
                         <TaskSuggestionCard item={item} connected={atlassianConnection === 'connected'} canCreate={atlassianCanCreateTasks} connecting={atlassianBusy || atlassianAuthorizing || atlassianConnection === 'checking'} onConnect={(force) => { void connectAtlassian(force); }} />
                       </>
                     ) : (
@@ -791,8 +800,8 @@ export default function App() {
         </div>
       </section>
 
-      {(!running || settingsOpen) && <div id="capture-settings" className="settings-panel">
-      {running && <h2 className="settings-heading">Settings</h2>}
+      {(settingsOpen || (!running && microphone !== 'granted' && microphone !== 'checking')) && <div id="capture-settings" className="settings-panel">
+      <h2 className="settings-heading">Connections & audio</h2>
       <section className="section-card drive-card" aria-live="polite">
         <div className="drive-card-topline">
           <div className="section-heading">
@@ -833,6 +842,7 @@ export default function App() {
                 ? `Searching ${atlassianSources.includes('confluence') ? 'Jira and Confluence' : 'Jira'}${atlassianSite ? ` · ${new URL(atlassianSite).hostname}` : ''}`
                 : atlassianAuthorizing ? 'Finish sign-in in the Atlassian tab'
                   : atlassianConnection === 'checking' ? 'Checking connection…'
+                    : atlassianConnection === 'error' ? 'Connection check unavailable'
                     : atlassianConfigured ? 'Connect to find issues and pages mentioned in meetings'
                       : 'Add Atlassian OAuth credentials to the local backend'}</p>
             </div>
@@ -841,19 +851,11 @@ export default function App() {
         </div>
         {atlassianError && <p className="drive-error" role="status">{atlassianError}</p>}
         {atlassianConnection !== 'connected' && (
-          <button className="drive-connect-button" onClick={() => void connectAtlassian()}
+          <button className="drive-connect-button" onClick={() => atlassianConnection === 'error' ? void syncAtlassianStatus() : void connectAtlassian()}
             disabled={atlassianBusy || atlassianAuthorizing || atlassianConnection === 'checking'}>
-            {atlassianBusy ? 'Opening Atlassian sign-in…' : atlassianAuthorizing ? 'Waiting for Atlassian sign-in…' : 'Connect Atlassian'}
+            {atlassianBusy ? 'Opening Atlassian sign-in…' : atlassianAuthorizing ? 'Waiting for Atlassian sign-in…' : atlassianConnection === 'error' ? 'Retry connection check' : 'Connect Atlassian'}
           </button>
         )}
-      </section>
-
-      <section className="section-card">
-        <div className="section-heading">
-          <span className="mic-icon" aria-hidden="true">♪</span>
-          <div><h2>Meet tab audio</h2><p>Access is checked when capture starts</p></div>
-        </div>
-        <p className="privacy-note">No screen, window, tab video, or camera stream is requested.</p>
       </section>
 
       <section className="section-card">
@@ -873,19 +875,13 @@ export default function App() {
             {microphone === 'requesting' ? 'Waiting for permission…' : microphone === 'denied' ? 'Retry microphone access' : 'Enable microphone'}
           </button>
         )}
-        <p className="privacy-note">Your microphone and Meet audio are streamed to your local service at <code>localhost:8000</code> only while capture is running.</p>
+        <p className="privacy-note">Audio stays in your local capture pipeline. Capture continues when you close this panel.</p>
       </section>
       </div>}
 
-      {!running && <div className="actions">
-          <button className="start-button" onClick={startCapture} disabled={busy || !inMeeting || microphone !== 'granted' || readyTabId !== activeTab?.id}>
-            {busy ? 'Starting…' : readyTabId !== activeTab?.id && inMeeting && microphone === 'granted' ? 'Preparing…' : state.captureStatus === 'error' ? 'Retry capture' : 'Start capture'}
-          </button>
-        <p className="action-hint">{!inMeeting ? 'Capture is only available inside an active Meet call.' : microphone === 'checking' ? 'Checking microphone access…' : microphone !== 'granted' ? 'Enable microphone access to continue.' : 'Only Meet tab audio and your microphone will be captured.'}</p>
-      </div>}
 
       <footer className="footer">
-        <span>{activeTab?.title ? activeTab.title.length > 42 ? `${activeTab.title.slice(0, 39)}…` : activeTab.title : 'Active browser tab'}</span>
+        <span title={`Version ${extensionVersion}`}>{activeTab?.title ? activeTab.title.length > 42 ? `${activeTab.title.slice(0, 39)}…` : activeTab.title : 'Active browser tab'}</span>
         <button className="refresh-button" onClick={() => void refresh()} aria-label="Refresh status" title="Refresh status">↻</button>
       </footer>
     </main>
