@@ -54,9 +54,7 @@ export interface ExtensionState {
   captureStatus: CaptureStatus;
   backendConnected: boolean;
   timeline?: TimelineSnapshot;
-  transcript?: string;
   audioWarning?: string;
-  transcriptionWarning?: string;
   timelineOwner?: MeetingIdentity;
   error?: string;
 }

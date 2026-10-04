@@ -122,6 +122,3 @@ button:focus-visible { outline: 3px solid #8bb6ff; outline-offset: 2px; }
 @keyframes pulse { 50% { box-shadow: 0 0 0 7px #12a66a10; } }
 @media (max-width: 300px) { .shell { padding: 14px; gap: 13px; } .section-card, .meeting-card { padding: 13px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
-
-.live-transcript { margin-bottom: 12px; }
-.transcript-text { max-height: 120px; overflow-y: auto; white-space: pre-wrap; font-size: 13px; line-height: 1.5; }

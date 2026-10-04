@@ -1,11 +1,11 @@
 export const MICROPHONE_PERMISSION_KEY = 'microphonePermissionGranted';
 
-// A side panel can report "prompt" even after the extension's foreground
-// permission page successfully opened the mic. getUserMedia remains the
-// authority at capture time; an explicit denial always clears this hint.
+// Prefer the browser's current permission state. The remembered value is only
+// a fallback for Brave versions that do not expose microphone permissions to
+// extension side panels at all.
 export function resolveMicrophonePermission(state: PermissionState | undefined, remembered: boolean): 'granted' | 'denied' | 'prompt' {
-  if (state === 'denied') return 'denied';
-  return state === 'granted' || remembered ? 'granted' : 'prompt';
+  if (state !== undefined) return state;
+  return remembered ? 'granted' : 'prompt';
 }
 
 export function isMicrophonePermissionError(name?: string): boolean {

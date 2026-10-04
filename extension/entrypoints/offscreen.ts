@@ -127,13 +127,6 @@ async function start(streamId: string, sessionId: string) {
     try {
       const message: unknown = JSON.parse(event.data);
       if (isTimelineSnapshot(message)) notify({ timeline: message });
-      if (typeof message === 'object' && message !== null && 'type' in message && message.type === 'transcription_state') {
-        const update = message as { transcript?: unknown; warning?: unknown };
-        if (typeof update.transcript === 'string') notify({
-          transcript: update.transcript.slice(-3000),
-          transcriptionWarning: typeof update.warning === 'string' ? update.warning : undefined,
-        });
-      }
     } catch {
       // Ignore malformed or unrelated backend messages.
     }
@@ -172,6 +165,7 @@ async function start(streamId: string, sessionId: string) {
   let quietSince = Date.now();
   let recoveringMicrophone = false;
   let microphoneRecoveryAttempts = 0;
+  let microphoneUnavailableChecks = 0;
   let nextMicrophoneRecoveryAt = 0;
   const recoverMicrophone = async () => {
     const now = Date.now();
@@ -184,6 +178,13 @@ async function start(streamId: string, sessionId: string) {
     recoveringMicrophone = true;
     notify({ audioWarning: 'Microphone unavailable. Meet audio and searches are still running while it reconnects…' });
     try {
+      // Release the unusable source before opening its replacement. Brave can
+      // reject a second request while a stale live-but-muted track still owns
+      // the input device.
+      microphoneSource?.disconnect();
+      microphoneStream?.getTracks().forEach((track) => track.stop());
+      microphoneSource = undefined;
+      microphoneStream = undefined;
       const replacement = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false,
       });
@@ -191,14 +192,13 @@ async function start(streamId: string, sessionId: string) {
         replacement.getTracks().forEach((track) => track.stop());
         return;
       }
-      microphoneSource?.disconnect();
-      microphoneStream?.getTracks().forEach((track) => track.stop());
       microphoneStream = replacement;
       microphoneSource = sessionContext.createMediaStreamSource(replacement);
       microphoneSource.connect(microphoneGain!);
       microphoneSource.connect(microphoneAnalyser);
       quietSince = Date.now();
       microphoneRecoveryAttempts = 0;
+      microphoneUnavailableChecks = 0;
       nextMicrophoneRecoveryAt = 0;
       await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: true }).catch(() => undefined);
       notify({ audioWarning: undefined });
@@ -207,14 +207,21 @@ async function start(streamId: string, sessionId: string) {
       microphoneRecoveryAttempts += 1;
       const retryDelayMs = Math.min(30_000, 3_000 * 2 ** (microphoneRecoveryAttempts - 1));
       nextMicrophoneRecoveryAt = Date.now() + retryDelayMs;
+      let permissionState: PermissionState | undefined;
       if (error instanceof Error && ['NotAllowedError', 'SecurityError'].includes(error.name)) {
+        permissionState = await navigator.permissions.query({ name: 'microphone' as PermissionName })
+          .then((permission) => permission.state)
+          .catch(() => undefined);
+      }
+      // A transient NotAllowedError from an automatic background reopen is
+      // not proof that the user revoked a previously granted permission.
+      if (permissionState === 'denied') {
         await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: false }).catch(() => undefined);
       }
-      const reason = error instanceof Error && error.name
-        ? ` (${error.name})`
-        : '';
       notify({
-        audioWarning: `Microphone unavailable${reason}. Meet audio, transcription, and searches are still running; retrying automatically.`,
+        audioWarning: permissionState === 'denied'
+          ? 'Microphone access is blocked for Meeting Intelligence. Stop capture, enable microphone once, then restart.'
+          : 'Microphone reconnect is pending. Meet audio and searches remain active; the extension will retry quietly.',
       });
     } finally {
       recoveringMicrophone = false;
@@ -231,13 +238,21 @@ async function start(streamId: string, sessionId: string) {
       return;
     }
     const microphoneTracks = microphoneStream?.getAudioTracks() ?? [];
-    const microphoneUnavailable = microphoneStream?.active !== true || microphoneTracks.length === 0 || microphoneTracks.every(
-      (track) => track.readyState === 'ended' || track.muted || !track.enabled,
-    );
-    if (microphoneUnavailable) {
+    const microphoneEnded = microphoneStream?.active !== true || microphoneTracks.length === 0
+      || microphoneTracks.every((track) => track.readyState === 'ended');
+    if (microphoneEnded) {
+      microphoneUnavailableChecks = 0;
       void recoverMicrophone();
       return;
     }
+    const microphonePaused = microphoneTracks.every((track) => track.muted || !track.enabled);
+    if (microphonePaused) {
+      microphoneUnavailableChecks += 1;
+      if (microphoneUnavailableChecks >= 3) void recoverMicrophone();
+      else notify({ audioWarning: 'Microphone paused briefly. Waiting for Brave to resume it…' });
+      return;
+    }
+    microphoneUnavailableChecks = 0;
     if (sessionContext.state !== 'running') {
       void sessionContext.resume().catch(() => undefined);
       notify({ audioWarning: 'Audio input paused. Trying to resume…' });

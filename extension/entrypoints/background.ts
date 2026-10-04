@@ -171,7 +171,7 @@ function startCapture(tabId: number) {
     const meetingId = meetingIds.get(tabId);
     if (!meetingId) throw new Error('Could not identify this Meet room. Refresh the Meet tab and try again.');
     const captureSessionId = crypto.randomUUID();
-    state = { ...state, meetingStatus: 'in-meeting', meetingTabId: tabId, captureTabId: tabId, captureSessionId, captureStatus: 'connecting', backendConnected: false, timeline: undefined, transcript: undefined, audioWarning: undefined, transcriptionWarning: undefined, timelineOwner: { tabId, meetingId }, error: undefined };
+    state = { ...state, meetingStatus: 'in-meeting', meetingTabId: tabId, captureTabId: tabId, captureSessionId, captureStatus: 'connecting', backendConnected: false, timeline: undefined, audioWarning: undefined, timelineOwner: { tabId, meetingId }, error: undefined };
     void broadcast();
     const result = await chrome.runtime.sendMessage({ type: 'START_OFFSCREEN', streamId, captureSessionId }) as { ok?: boolean; error?: string } | undefined;
     if (!result?.ok) {

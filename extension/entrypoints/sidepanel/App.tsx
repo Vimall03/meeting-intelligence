@@ -723,6 +723,11 @@ export default function App() {
           Google Meet cannot access its microphone. Click Meet’s microphone warning and allow the selected input device. Meeting Intelligence will keep Meet audio and pending searches running.
         </div>
       )}
+      {capturingHere && state.audioWarning && (
+        <div className={`notice ${state.audioWarning.includes('blocked') ? 'error' : 'info'}`} role="status">
+          {state.audioWarning}
+        </div>
+      )}
 
       {running && (
         <div className="actions">
@@ -731,13 +736,6 @@ export default function App() {
           </button>
         </div>
       )}
-
-      {capturingHere && <section className="section-card live-transcript" aria-label="Live transcript">
-        <strong>Live transcript</strong>
-        {state.audioWarning && <p className="task-error" role="status">{state.audioWarning}</p>}
-        {state.transcriptionWarning && <p className="task-error" role="status">{state.transcriptionWarning}</p>}
-        <p className="transcript-text" aria-live="polite">{state.transcript || 'Listening for speech…'}</p>
-      </section>}
 
       <section className="timeline-section" aria-labelledby="timeline-heading">
         <div className="timeline-heading">
