@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from html import escape
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+
+from app.core.user_messages import product_error
 
 from app.services.atlassian_service import (
     AtlassianAPIError, AtlassianAuthorizationRequiredError, AtlassianError,
@@ -40,12 +43,13 @@ async def start_auth(service: Service, force: bool = False) -> dict[str, Any]:
 @router.get("/oauth/callback", response_class=HTMLResponse)
 async def callback(service: Service, code: str | None = None, state: str | None = None, error: str | None = None, error_description: str | None = None) -> HTMLResponse:
     if error:
-        return _result_page("Atlassian was not connected", error_description or error, 400)
+        return _result_page("Sign-in wasn’t completed", product_error("MI-ATL-003"), 400)
     try:
-        result = await service.complete_authorization(code or "", state or "")
-        return _result_page("Atlassian connected", f"Jira issues and Confluence pages from {result['site_url']} can now appear in your meeting timeline.", 200)
+        await service.complete_authorization(code or "", state or "")
+        return _result_page("Jira and Confluence are connected", "Related Jira issues and Confluence pages can now appear in your meeting activity. You can also review and create suggested Jira tasks.", 200)
     except AtlassianError as exc:
-        return _result_page("Atlassian could not be connected", str(exc), 400)
+        logging.getLogger(__name__).warning("MI-ATL-002: sign-in failed (%s)", type(exc).__name__)
+        return _result_page("We couldn’t connect Jira and Confluence", product_error("MI-ATL-002"), 400)
 
 
 @router.post("/disconnect", status_code=204)
@@ -94,7 +98,9 @@ def _http_error(exc: AtlassianError) -> HTTPException:
         status = 502
     else:
         status = 500
-    return HTTPException(status_code=status, detail={"code": "atlassian_error", "message": str(exc)})
+    support_code = "MI-AUTH-001" if status == 401 else "MI-ATL-001"
+    logging.getLogger(__name__).warning("%s: integration request failed (%s)", support_code, type(exc).__name__)
+    return HTTPException(status_code=status, detail={"code": "atlassian_error", "support_code": support_code, "message": product_error(support_code)})
 
 
 def _result_page(title: str, message: str, status: int) -> HTMLResponse:

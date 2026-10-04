@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from html import escape
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
+
+from app.core.user_messages import product_error
 
 from app.services.google_drive_service import (
     GoogleDriveAPIError,
@@ -55,7 +58,7 @@ async def oauth_callback(
     if error:
         return _oauth_result_page(
             "Google Drive was not connected",
-            error_description or error,
+            product_error("MI-DRV-003"),
             success=False,
             status_code=400,
         )
@@ -67,9 +70,10 @@ async def oauth_callback(
             success=True,
         )
     except GoogleDriveError as exc:
+        logging.getLogger(__name__).warning("MI-DRV-002: sign-in failed (%s)", type(exc).__name__)
         return _oauth_result_page(
             "Google Drive could not be connected",
-            str(exc),
+            product_error("MI-DRV-002"),
             success=False,
             status_code=502,
         )
@@ -106,24 +110,25 @@ async def get_file(file_id: str, service: Service) -> dict[str, Any]:
 
 
 def _http_error(error: GoogleDriveError) -> HTTPException:
+    logging.getLogger(__name__).warning("Drive request failed (%s)", type(error).__name__)
     if isinstance(error, GoogleDriveAuthorizationRequiredError):
         return HTTPException(
             status_code=401,
-            detail={"code": "google_drive_auth_required", "message": str(error)},
+            detail={"code": "google_drive_auth_required", "support_code": "MI-AUTH-001", "message": product_error("MI-AUTH-001")},
         )
     if isinstance(error, GoogleDriveOAuthError):
         return HTTPException(
             status_code=502,
-            detail={"code": "google_drive_oauth_error", "message": str(error)},
+            detail={"code": "google_drive_oauth_error", "support_code": "MI-DRV-002", "message": product_error("MI-DRV-002")},
         )
     if isinstance(error, GoogleDriveAPIError):
         return HTTPException(
             status_code=502,
-            detail={"code": "google_drive_api_error", "message": str(error)},
+            detail={"code": "google_drive_api_error", "support_code": "MI-DRV-001", "message": product_error("MI-DRV-001")},
         )
     return HTTPException(
         status_code=503,
-        detail={"code": "google_drive_not_configured", "message": str(error)},
+        detail={"code": "google_drive_not_configured", "support_code": "MI-DRV-002", "message": product_error("MI-DRV-002")},
     )
 
 

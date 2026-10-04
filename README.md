@@ -1,6 +1,6 @@
 # Meeting Intelligence
 
-A Google Meet extension that captures meeting audio and your microphone, finds related Drive, Jira, and Confluence content, and drafts Jira tasks for review.
+An assistant for online meetings that finds related Drive, Jira, and Confluence content and drafts Jira tasks for review. Live listening currently supports Google Meet; other platforms are planned.
 
 Build the extension with `cd extension` and `npm run build`, then load `extension/.output/chrome-mv3` in Brave as an unpacked extension. See [extension setup](extension/README.md) for microphone permissions and checks.
 

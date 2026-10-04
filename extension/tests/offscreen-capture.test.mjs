@@ -1,3 +1,4 @@
+import * as userMessages from '../lib/user-messages.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -44,7 +45,7 @@ function harness({ failReplacementName, permissionState = 'prompt', deferReplace
   }
   const source = fs.readFileSync(new URL('../entrypoints/offscreen.ts', import.meta.url), 'utf8');
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
-    exports: {}, require(name) { return name.includes('config') ? { AUDIO_MIME_TYPE: 'audio/webm', AUDIO_WINDOW_MS: 3000, MEETING_SOCKET_URL: 'ws://localhost' } : { isTimelineSnapshot: message => message.type === 'timeline_snapshot' }; },
+    exports: {}, require(name) { if (name.includes('user-messages')) return userMessages; return name.includes('config') ? { AUDIO_MIME_TYPE: 'audio/webm', AUDIO_WINDOW_MS: 3000, MEETING_SOCKET_URL: 'ws://localhost' } : { isTimelineSnapshot: message => message.type === 'timeline_snapshot' }; },
     defineUnlistedScript: callback => callback(), DOMException, Error, MediaRecorder: Recorder, WebSocket: Socket, AudioContext: Context,
     navigator: { mediaDevices: { async getUserMedia(options) {
       if (options.audio.mandatory) return tab;
@@ -103,7 +104,7 @@ test('capture replaces a microphone that becomes muted while its track remains l
   h.health();
   h.health();
   assert.equal(staleTrack.readyState, 'live');
-  assert.match(h.messages.at(-1).state.audioWarning, /paused briefly/);
+  assert.match(h.messages.at(-1).state.audioWarning, /briefly paused/);
   h.health();
   await new Promise(resolve => setImmediate(resolve));
 
@@ -126,7 +127,7 @@ test('failed microphone recovery keeps the websocket and Meet capture alive', as
   assert.equal(socket.readyState, 1);
   assert.equal(h.recorders[0].state, 'recording');
   assert.equal(h.messages.at(-1).state.captureStatus, undefined);
-  assert.match(h.messages.at(-1).state.audioWarning, /reconnect is pending/);
+  assert.match(h.messages.at(-1).state.audioWarning, /still reconnecting/);
 
   h.window();
   assert.equal(socket.sent.length, 1);
@@ -142,7 +143,7 @@ test('a transient automatic NotAllowedError does not revoke remembered microphon
 
   const permissionUpdates = h.messages.filter(message => message.type === 'MICROPHONE_PERMISSION_STATUS');
   assert.deepEqual(permissionUpdates.map(message => message.granted), [true]);
-  assert.match(h.messages.at(-1).state.audioWarning, /reconnect is pending/);
+  assert.match(h.messages.at(-1).state.audioWarning, /still reconnecting/);
   await h.send({ type: 'STOP_OFFSCREEN' });
 });
 

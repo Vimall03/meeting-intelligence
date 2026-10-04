@@ -1,3 +1,4 @@
+import { problem, userError, microphoneProblem } from '../lib/user-messages';
 import { AUDIO_MIME_TYPE, AUDIO_WINDOW_MS, MEETING_SOCKET_URL } from '../lib/config';
 import { isTimelineSnapshot } from '../lib/timeline';
 
@@ -20,7 +21,7 @@ let startPending = false;
 
 function assertCurrent(generation: number) {
   if (generation !== captureGeneration || stopping) {
-    throw new DOMException('Capture was canceled.', 'AbortError');
+    throw new DOMException(problem('MI-CAP-006'), 'AbortError');
   }
 }
 
@@ -52,21 +53,21 @@ async function start(streamId: string, sessionId: string) {
   await cleanup;
   if (generation !== captureGeneration) {
     void selection.then((stream) => stream.getTracks().forEach((track) => track.stop()));
-    throw new DOMException('Capture was canceled.', 'AbortError');
+    throw new DOMException(problem('MI-CAP-006'), 'AbortError');
   }
   stopping = false;
   captureSessionId = sessionId;
   const selectedTab = await selection;
   if (generation !== captureGeneration || stopping) {
     selectedTab.getTracks().forEach((track) => track.stop());
-    throw new DOMException('Capture was canceled.', 'AbortError');
+    throw new DOMException(problem('MI-CAP-006'), 'AbortError');
   }
   tabStream = selectedTab;
   if (tabStream.getAudioTracks().length === 0) {
-    throw new Error('Brave did not provide audio from this Meet tab.');
+    throw new Error(problem('MI-CAP-003'));
   }
   if (tabStream.getVideoTracks().length > 0) {
-    throw new Error('Brave unexpectedly provided a video track; capture stopped to protect tab privacy.');
+    throw new Error(problem('MI-CAP-009'));
   }
 
   // The tab stream contains other participants and shared media. The local
@@ -83,7 +84,7 @@ async function start(streamId: string, sessionId: string) {
     });
     if (generation !== captureGeneration || stopping) {
       selectedMicrophone.getTracks().forEach((track) => track.stop());
-      throw new DOMException('Capture was canceled.', 'AbortError');
+      throw new DOMException(problem('MI-CAP-006'), 'AbortError');
     }
     microphoneStream = selectedMicrophone;
     await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: true }).catch(() => undefined);
@@ -93,15 +94,15 @@ async function start(streamId: string, sessionId: string) {
       const permission = await navigator.permissions.query({ name: 'microphone' as PermissionName }).catch(() => undefined);
       if (permission?.state !== 'granted') {
         await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: false }).catch(() => undefined);
-        throw new Error('Brave has not granted microphone access to Meeting Intelligence. Press Enable microphone in the side panel, then allow the browser prompt.');
+        throw new Error(problem('MI-MIC-001'));
       }
-      throw new Error(`Brave could not open the microphone despite permission being granted (${error.name}: ${error.message}). Check the selected input device and macOS microphone access.`);
+      throw new Error(problem('MI-MIC-002'));
     }
     throw error;
   }
 
   if (!MediaRecorder.isTypeSupported(AUDIO_MIME_TYPE)) {
-    throw new Error('This browser does not support WebM/Opus audio capture.');
+    throw new Error(problem('MI-CAP-008'));
   }
 
   notify({ captureStatus: 'connecting', backendConnected: false, timeline: undefined, error: undefined });
@@ -113,12 +114,12 @@ async function start(streamId: string, sessionId: string) {
   };
   sessionSocket.onerror = () => {
     if (socket !== sessionSocket || stopping) return;
-    notify({ captureStatus: 'error', backendConnected: false, error: 'Backend unavailable.' });
+    notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-CON-001') });
     void stop();
   };
   sessionSocket.onclose = () => {
     if (socket !== sessionSocket || stopping) return;
-    notify({ captureStatus: 'error', backendConnected: false, error: 'Backend disconnected.' });
+    notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-CON-002') });
     // Release the selected tab and mic when the backend disconnects.
     void stop();
   };
@@ -176,7 +177,7 @@ async function start(streamId: string, sessionId: string) {
       || now < nextMicrophoneRecoveryAt
     ) return;
     recoveringMicrophone = true;
-    notify({ audioWarning: 'Microphone unavailable. Meet audio and searches are still running while it reconnects…' });
+    notify({ audioWarning: problem('MI-MIC-004') });
     try {
       // Release the unusable source before opening its replacement. Brave can
       // reject a second request while a stale live-but-muted track still owns
@@ -223,8 +224,8 @@ async function start(streamId: string, sessionId: string) {
       if (stopping || generation !== captureGeneration) return;
       notify({
         audioWarning: permissionState === 'denied'
-          ? 'Microphone access is blocked for Meeting Intelligence. Stop capture, enable microphone once, then restart.'
-          : 'Microphone reconnect is pending. Meet audio and searches remain active; the extension will retry quietly.',
+          ? problem('MI-MIC-001')
+          : problem('MI-MIC-006'),
       });
     } finally {
       recoveringMicrophone = false;
@@ -236,13 +237,13 @@ async function start(streamId: string, sessionId: string) {
     if (stopping || generation !== captureGeneration) return;
     const tabTracks = tabStream?.getAudioTracks() ?? [];
     if (tabTracks.length === 0 || tabTracks.every((track) => track.readyState === 'ended')) {
-      notify({ captureStatus: 'error', backendConnected: false, error: 'Meet tab audio ended. Restart capture in the active call.' });
+      notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-CAP-007') });
       void stop();
       return;
     }
     if (sessionContext.state !== 'running') {
       void sessionContext.resume().catch(() => undefined);
-      notify({ audioWarning: 'Audio input paused. Trying to resume…' });
+      notify({ audioWarning: problem('MI-MIC-007') });
     }
     const microphoneTracks = microphoneStream?.getAudioTracks() ?? [];
     const microphoneEnded = microphoneStream?.active !== true || microphoneTracks.length === 0
@@ -256,7 +257,7 @@ async function start(streamId: string, sessionId: string) {
     if (microphonePaused) {
       microphoneUnavailableChecks += 1;
       if (microphoneUnavailableChecks >= 3) void recoverMicrophone();
-      else notify({ audioWarning: 'Microphone paused briefly. Waiting for Brave to resume it…' });
+      else notify({ audioWarning: problem('MI-MIC-005') });
       return;
     }
     microphoneUnavailableChecks = 0;
@@ -264,7 +265,7 @@ async function start(streamId: string, sessionId: string) {
     const hasAudio = level(microphoneAnalyser) > 0.001 || level(tabAnalyser) > 0.001;
     if (hasAudio) quietSince = Date.now();
     notify({ audioWarning: Date.now() - quietSince > 15000
-      ? 'No audio detected. If you are speaking, check the microphone selected in Brave.'
+      ? problem('MI-MIC-008')
       : undefined });
   }, 3000);
 
@@ -280,7 +281,7 @@ async function start(streamId: string, sessionId: string) {
   };
   activeRecorder.onerror = () => {
     if (recorder !== activeRecorder) return;
-    notify({ captureStatus: 'error', backendConnected: false, error: 'Audio capture failed.' });
+    notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-CAP-004') });
     void stop();
   };
   startRecordingWindow(activeRecorder);
@@ -349,11 +350,11 @@ chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string
   }
   if (message.type === 'START_OFFSCREEN') {
     if (!message.streamId || !message.captureSessionId) {
-      sendResponse({ ok: false, error: 'Missing tab audio authorization.' });
+      sendResponse({ ok: false, error: problem('MI-CAP-003') });
       return false;
     }
     if (startPending) {
-      sendResponse({ ok: false, error: 'Audio capture is already starting. Wait a moment before retrying.' });
+      sendResponse({ ok: false, error: problem('MI-CAP-002') });
       return false;
     }
     startPending = true;
@@ -377,10 +378,10 @@ chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string
 
 function describeCaptureError(error: unknown) {
   const errorName = error instanceof Error ? error.name : 'UnknownError';
-  if (errorName === 'NotFoundError') {
-    return 'No microphone was found on this device.';
+  if (['NotFoundError', 'NotReadableError', 'NotAllowedError', 'SecurityError', 'OverconstrainedError'].includes(errorName)) {
+    return microphoneProblem(errorName);
   }
-  return error instanceof Error ? error.message : 'Unable to capture meeting and microphone audio.';
+  return userError(error, 'MI-CAP-004');
 }
 
 export default defineUnlistedScript(() => {

@@ -1,3 +1,4 @@
+import { problem, httpProblem } from './user-messages.ts';
 export type JiraProject = { id: string; key: string; name: string };
 export type CreatedJiraTask = { key: string; url: string; project_key: string };
 
@@ -5,13 +6,13 @@ type ErrorPayload = { detail?: { message?: string } };
 
 export async function loadJiraProjects(url: string, fetcher: typeof fetch = fetch): Promise<JiraProject[]> {
   const response = await fetcher(url, { cache: 'no-store' }).catch(() => {
-    throw new Error('Could not reach the local backend. Start it in VS Code, then reopen the project picker.');
+    throw new Error(problem('MI-CON-001'));
   });
   const payload = await response.json().catch(() => ({})) as ErrorPayload & { projects?: JiraProject[] };
-  if (!response.ok) throw new Error(payload.detail?.message ?? `Could not load Jira projects (${response.status}).`);
+  if (!response.ok) throw new Error(httpProblem(response.status, 'MI-JIR-001'));
   if (!Array.isArray(payload.projects) || !payload.projects.every((project) =>
     project && typeof project.id === 'string' && typeof project.key === 'string' && typeof project.name === 'string'
-  )) throw new Error('Jira returned an invalid project list.');
+  )) throw new Error(problem('MI-JIR-001'));
   return payload.projects;
 }
 
@@ -20,10 +21,10 @@ export async function submitJiraTask(url: string, task: { project_id: string; ti
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(task),
   }).catch(() => {
-    throw new Error('Lost connection to the local backend. Make sure it is running in VS Code. Check Jira before retrying in case the task was already created.');
+    throw new Error(problem('MI-JIR-004'));
   });
   const payload = await response.json().catch(() => ({})) as ErrorPayload & Partial<CreatedJiraTask>;
-  if (!response.ok) throw new Error(payload.detail?.message ?? `Jira task creation failed (${response.status}).`);
+  if (!response.ok) throw new Error(httpProblem(response.status, 'MI-JIR-003'));
   try {
     const taskUrl = new URL(payload.url ?? '');
     if (typeof payload.key !== 'string' || !/^[A-Z][A-Z0-9_]*-\d+$/.test(payload.key)
@@ -32,7 +33,7 @@ export async function submitJiraTask(url: string, task: { project_id: string; ti
       throw new Error('invalid task');
     }
   } catch {
-    throw new Error('Jira returned an invalid task link. Check the project before retrying.');
+    throw new Error(problem('MI-JIR-005'));
   }
   return payload as CreatedJiraTask;
 }

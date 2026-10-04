@@ -1,3 +1,4 @@
+import { problem, userError, httpProblem } from '../lib/user-messages';
 import type { ExtensionMessage, ExtensionState } from '../lib/types';
 import { didMeetingEnd, isTimelineForMeeting, meetingIdFromUrl } from '../lib/meeting-session';
 import { MICROPHONE_PERMISSION_KEY, isMicrophonePermissionError } from '../lib/microphone-permission';
@@ -134,12 +135,12 @@ async function checkMeetingTab(tabId: number) {
 async function prepareCapture(tabId: number) {
   await initializeState();
   if (!(await checkMeetingTab(tabId)).inMeeting) {
-    state = { ...state, captureStatus: 'error', error: 'Open an active Google Meet call first.' };
+    state = { ...state, captureStatus: 'error', error: problem('MI-CAP-001') };
     await broadcast();
     return { ok: false, error: state.error };
   }
   if (state.captureStatus === 'capturing' || state.captureStatus === 'connecting') {
-    return { ok: false, error: 'A capture is already running. Stop it before starting another.' };
+    return { ok: false, error: problem('MI-CAP-002') };
   }
   await ensureOffscreen();
   state = { ...state, meetingStatus: 'in-meeting', meetingTabId: tabId, captureStatus: 'idle', error: undefined };
@@ -149,7 +150,7 @@ async function prepareCapture(tabId: number) {
 
 function startCapture(tabId: number) {
   if (state.captureStatus === 'capturing' || state.captureStatus === 'connecting') {
-    return Promise.resolve({ ok: false, error: 'A capture is already running.' });
+    return Promise.resolve({ ok: false, error: problem('MI-CAP-002') });
   }
   const restoredState = initializeState();
   // Call tabCapture immediately from the click message. The browser's result
@@ -159,39 +160,39 @@ function startCapture(tabId: number) {
       const error = chrome.runtime.lastError;
       if (error) reject(new Error(error.message));
       else if (streamId) resolve(streamId);
-      else reject(new Error('Brave did not grant this Meet tab for audio capture.'));
+      else reject(new Error(problem('MI-CAP-003')));
     });
   });
   return Promise.all([restoredState, streamIdRequest]).then(async ([, streamId]) => {
     if (state.captureStatus === 'capturing' || state.captureStatus === 'connecting') {
-      return { ok: false, error: 'A capture is already running.', state };
+      return { ok: false, error: problem('MI-CAP-002'), state };
     }
     await ensureOffscreen();
-    if (!(await checkMeetingTab(tabId)).inMeeting) throw new Error('Open an active Google Meet call first.');
+    if (!(await checkMeetingTab(tabId)).inMeeting) throw new Error(problem('MI-CAP-001'));
     const meetingId = meetingIds.get(tabId);
-    if (!meetingId) throw new Error('Could not identify this Meet room. Refresh the Meet tab and try again.');
+    if (!meetingId) throw new Error(problem('MI-CAP-004'));
     const captureSessionId = crypto.randomUUID();
     state = { ...state, meetingStatus: 'in-meeting', meetingTabId: tabId, captureTabId: tabId, captureSessionId, captureStatus: 'connecting', backendConnected: false, timeline: undefined, audioWarning: undefined, timelineOwner: { tabId, meetingId }, error: undefined };
     void broadcast();
     const result = await chrome.runtime.sendMessage({ type: 'START_OFFSCREEN', streamId, captureSessionId }) as { ok?: boolean; error?: string } | undefined;
     if (!result?.ok) {
-      if (state.captureStatus === 'idle') return { ok: false, error: 'Capture was canceled.', state };
+      if (state.captureStatus === 'idle') return { ok: false, error: problem('MI-CAP-006'), state };
       if (state.captureStatus !== 'error') {
-        state = { ...state, captureStatus: 'error', error: result?.error ?? 'The audio capture could not be started. Try again.' };
+        state = { ...state, captureStatus: 'error', error: result?.error ?? problem('MI-CAP-004') };
         await broadcast();
       }
       return { ok: false, error: state.error, state };
     }
     return { ok: true, state };
   }).catch(async (error: unknown) => {
-    const message = error instanceof Error ? error.message : 'Meet audio capture failed.';
+    const message = error instanceof Error ? error.message : problem('MI-CAP-004');
     const needsInvocation = /not been invoked|activeTab permission|permission for the specified tab/i.test(message);
     state = {
       ...state,
       captureStatus: 'error',
       error: needsInvocation
-        ? 'Brave did not grant tab audio access. Open Meeting Intelligence from its toolbar button on the active Meet tab and try again.'
-        : message,
+        ? problem('MI-CAP-003')
+        : userError(error, 'MI-CAP-004'),
     };
     await broadcast();
     return { ok: false, error: state.error, state };
@@ -276,20 +277,20 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
     await broadcast();
     return { ok: true };
   }
-  return { ok: false, error: 'Unsupported extension message.' };
+  return { ok: false, error: problem('MI-APP-001') };
 }
 
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendResponse) => {
   if (message.type === 'START_OFFSCREEN' || message.type === 'STOP_OFFSCREEN' || message.type === 'GET_OFFSCREEN_STATUS') return false;
   void handleMessage(message, sender)
     .then((response) => sendResponse(response))
-    .catch((error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Extension request failed.' }));
+    .catch((error: unknown) => sendResponse({ ok: false, error: userError(error) }));
   return true;
 });
 
 async function stopCapture() {
   const result = await chrome.runtime.sendMessage({ type: 'STOP_OFFSCREEN' }).catch(() => undefined) as { ok?: boolean } | undefined;
-  if (result && !result.ok) throw new Error('Could not release the audio capture. Try stopping it again.');
+  if (result && !result.ok) throw new Error(problem('MI-CAP-005'));
   state = { ...state, captureStatus: 'idle', captureTabId: undefined, captureSessionId: undefined, backendConnected: false, error: undefined };
   await broadcast();
 }
@@ -344,7 +345,7 @@ async function handleGoogleDriveOAuthNavigation(tabId: number, url: string) {
       await chrome.storage.local.set({
         [GOOGLE_DRIVE_AUTH_RESULT_KEY]: {
           connected: false,
-          error: callback.searchParams.get('error_description') ?? oauthError,
+          error: problem('MI-DRV-003'),
           completedAt: Date.now(),
         },
       });
@@ -353,9 +354,9 @@ async function handleGoogleDriveOAuthNavigation(tabId: number, url: string) {
     }
 
     const response = await fetch(GOOGLE_DRIVE_STATUS_URL, { cache: 'no-store' });
-    if (!response.ok) throw new Error(`Google Drive status request failed (${response.status}).`);
+    if (!response.ok) throw new Error(httpProblem(response.status, 'MI-DRV-001'));
     const status = await response.json() as { connected?: boolean };
-    if (!status.connected) throw new Error('Google authorization finished, but Drive is not connected yet.');
+    if (!status.connected) throw new Error(problem('MI-DRV-002'));
 
     await chrome.storage.local.set({
       [GOOGLE_DRIVE_AUTH_RESULT_KEY]: { connected: true, completedAt: Date.now() },
@@ -373,7 +374,7 @@ async function handleGoogleDriveOAuthNavigation(tabId: number, url: string) {
         await chrome.storage.local.set({
           [GOOGLE_DRIVE_AUTH_RESULT_KEY]: {
             connected: false,
-            error: error instanceof Error ? error.message : 'Could not finish Google Drive authorization.',
+            error: userError(error, 'MI-DRV-002'),
             completedAt: Date.now(),
           },
         });
@@ -395,7 +396,7 @@ async function handleGoogleDriveOAuthTabClosed(tabId: number) {
     await chrome.storage.local.set({
       [GOOGLE_DRIVE_AUTH_RESULT_KEY]: {
         connected: false,
-        error: 'The Google sign-in tab was closed before Drive connected. You can try again.',
+        error: problem('MI-DRV-003'),
         completedAt: Date.now(),
       },
     });

@@ -1,3 +1,4 @@
+import { microphoneProblem } from '../../lib/user-messages';
 import './style.css';
 
 const status = document.querySelector<HTMLElement>('#status')!;
@@ -17,13 +18,9 @@ async function requestMicrophonePermission() {
     await chrome.runtime.sendMessage({ type: 'MIC_PERMISSION_RESULT', granted: true });
   } catch (error) {
     const errorName = error instanceof Error ? error.name : 'UnknownError';
-    status.textContent = `Brave did not grant microphone access (${errorName}).`;
-    help.textContent = errorName === 'NotAllowedError' || errorName === 'SecurityError'
-      ? 'If you dismissed or previously blocked the prompt, open brave://extensions → Meeting Intelligence → Details → Site settings → Microphone and set it to Allow. Then retry from the side panel.'
-      : errorName === 'NotFoundError'
-        ? 'No microphone was found. Connect a microphone and retry from the side panel.'
-        : error instanceof Error ? error.message : 'Could not access the microphone. Retry from the side panel.';
-    await chrome.runtime.sendMessage({ type: 'MIC_PERMISSION_RESULT', granted: false, errorName, errorMessage: error instanceof Error ? error.message : undefined }).catch(() => undefined);
+    status.textContent = microphoneProblem(errorName);
+    help.textContent = 'Return to Meeting Intelligence to try again. In Brave’s permission request, choose “forever” under Remember my decision to keep microphone access enabled.';
+    await chrome.runtime.sendMessage({ type: 'MIC_PERMISSION_RESULT', granted: false, errorName, errorMessage: microphoneProblem(errorName) }).catch(() => undefined);
   }
 }
 

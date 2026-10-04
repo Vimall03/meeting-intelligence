@@ -4,8 +4,8 @@ export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
     name: 'Meeting Intelligence',
-    description: 'Capture Google Meet and microphone audio and stream it to a local backend.',
-    version: '0.1.7',
+    description: 'Find related files and turn online meeting follow-ups into Jira tasks. Live capture currently supports Google Meet.',
+    version: '0.1.8',
     permissions: ['activeTab', 'tabCapture', 'offscreen', 'storage', 'sidePanel', 'scripting'],
     host_permissions: ['https://meet.google.com/*', 'http://localhost:8000/*'],
     icons: {

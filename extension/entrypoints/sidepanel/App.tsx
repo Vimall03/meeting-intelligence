@@ -1,3 +1,4 @@
+import { problem, userError, httpProblem, microphoneProblem } from '../../lib/user-messages';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ExtensionMessage, ExtensionState, MeetingStatus, TaskSuggestionItem } from '../../lib/types';
 import { isTimelineForMeeting, meetingIdFromUrl } from '../../lib/meeting-session';
@@ -26,14 +27,14 @@ async function readGoogleDriveStatus(): Promise<boolean> {
   try {
     response = await fetch(GOOGLE_DRIVE_STATUS_URL, { cache: 'no-store' });
   } catch {
-    throw new Error('Could not reach the local backend. Make sure it is running, then retry.');
+    throw new Error(problem('MI-CON-001'));
   }
   const payload = await response.json().catch(() => ({})) as {
     connected?: boolean;
     detail?: { message?: string };
   };
   if (!response.ok) {
-    throw new Error(payload.detail?.message ?? `Google Drive status failed (${response.status}).`);
+    throw new Error(httpProblem(response.status, 'MI-DRV-001'));
   }
   return payload.connected === true;
 }
@@ -43,12 +44,12 @@ async function readAtlassianStatus(): Promise<{ connected: boolean; configured: 
   try {
     response = await fetch(ATLASSIAN_STATUS_URL, { cache: 'no-store' });
   } catch {
-    throw new Error('Could not reach the local backend. Start it, then retry.');
+    throw new Error(problem('MI-CON-001'));
   }
   const payload = await response.json().catch(() => ({})) as {
     connected?: boolean; configured?: boolean; site_url?: string; sources?: string[]; can_create_tasks?: boolean; detail?: { message?: string };
   };
-  if (!response.ok) throw new Error(payload.detail?.message ?? `Atlassian status failed (${response.status}).`);
+  if (!response.ok) throw new Error(httpProblem(response.status, 'MI-ATL-001'));
   return { connected: payload.connected === true, configured: payload.configured === true, site_url: payload.site_url,
     sources: payload.sources ?? [], can_create_tasks: payload.can_create_tasks === true };
 }
@@ -79,9 +80,9 @@ function TaskSuggestionCard({ item, connected, canCreate, connecting, onConnect 
       const available = await loadJiraProjects(ATLASSIAN_JIRA_PROJECTS_URL);
       setProjects(available);
       if (available.length === 1) setProjectId(available[0].id);
-      if (available.length === 0) setError('No Jira projects are available on this site.');
+      if (available.length === 0) setError(problem('MI-JIR-002'));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not load Jira projects. Check the backend connection.');
+      setError(userError(cause, 'MI-JIR-001'));
     } finally {
       setLoading(false);
     }
@@ -99,7 +100,7 @@ function TaskSuggestionCard({ item, connected, canCreate, connecting, onConnect 
       setCreated({ key: payload.key, url: payload.url });
       setOpen(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not create the task. Check Jira before retrying.');
+      setError(userError(cause, 'MI-JIR-004'));
     } finally {
       savingRef.current = false;
       setSaving(false);
@@ -107,8 +108,8 @@ function TaskSuggestionCard({ item, connected, canCreate, connecting, onConnect 
   };
 
   if (created) return <p className="task-created" role="status">Created <a href={created.url} target="_blank" rel="noreferrer">{created.key} ↗</a></p>;
-  if (!connected) return <button className="task-action" type="button" disabled={connecting} onClick={() => onConnect()}>{connecting ? 'Connecting Atlassian…' : 'Connect Atlassian to create'}</button>;
-  if (!canCreate) return <button className="task-action" type="button" disabled={connecting} onClick={() => onConnect(true)}>{connecting ? 'Waiting for Jira access…' : 'Enable Jira task creation'}</button>;
+  if (!connected) return <button className="task-action" type="button" disabled={connecting} onClick={() => onConnect()}>{connecting ? 'Connecting Atlassian…' : 'Connect Jira & Confluence to create'}</button>;
+  if (!canCreate) return <button className="task-action" type="button" disabled={connecting} onClick={() => onConnect(true)}>{connecting ? 'Waiting for permission…' : 'Allow Jira task creation'}</button>;
   return <div className="task-create">
     {!open ? <button className="task-action" type="button" onClick={() => void openForm()}>Create Jira task</button> : <>
       <label className="task-field">Jira project
@@ -129,7 +130,7 @@ function TaskSuggestionCard({ item, connected, canCreate, connecting, onConnect 
         <button type="button" onClick={() => void createTask()} disabled={saving || loading || !projectId || !title.trim() || !description.trim()}>{saving ? 'Creating…' : 'Create task'}</button>
       </div>
     </>}
-    {error && <p className="task-error" role="alert">{error}</p>}
+    {error && <p className="task-error" role="alert">{userError(error, 'MI-JIR-003')}</p>}
   </div>;
 }
 
@@ -289,13 +290,13 @@ export default function App() {
       });
       const tabChanged = previousTabId !== tab.id;
       if (contentScriptMissing) {
-        setNotice({ tone: 'error', text: 'Could not reconnect the extension to this Meet tab. Refresh the Meet tab once, then retry.' });
+        setNotice({ tone: 'error', text: problem('MI-APP-002') });
       } else if (tabChanged || contentScriptMissingRef.current) {
         setNotice(undefined);
       }
       contentScriptMissingRef.current = contentScriptMissing;
     } catch (error) {
-      setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'Could not read the active tab.' });
+      setNotice({ tone: 'error', text: userError(error, 'MI-APP-002') });
     }
   }, []);
 
@@ -310,7 +311,7 @@ export default function App() {
       return connected;
     } catch (error) {
       setGoogleDriveConnection('error');
-      setGoogleDriveError(error instanceof Error ? error.message : 'Could not check Google Drive connection.');
+      setGoogleDriveError(userError(error, 'MI-DRV-001'));
       return false;
     }
   }, []);
@@ -331,7 +332,7 @@ export default function App() {
       return status.connected;
     } catch (error) {
       setAtlassianConnection('error');
-      setAtlassianError(error instanceof Error ? error.message : 'Could not check Atlassian connection.');
+      setAtlassianError(userError(error, 'MI-ATL-001'));
       return false;
     }
   }, []);
@@ -359,8 +360,8 @@ export default function App() {
           void chrome.storage.local.get(MICROPHONE_PERMISSION_KEY).then((saved) => setMicrophone(resolveMicrophonePermission(undefined, saved[MICROPHONE_PERMISSION_KEY] === true)));
         }
         setNotice(message.granted
-          ? { tone: 'success', text: 'Microphone access is ready. Start capture when you are ready.' }
-          : { tone: 'error', text: message.errorMessage || `Could not open the microphone${message.errorName ? ` (${message.errorName})` : ''}. Check your input device and Brave microphone settings.` });
+          ? { tone: 'success', text: 'Microphone access is ready. Start listening when you are ready.' }
+          : { tone: 'error', text: microphoneProblem(message.errorName) });
       }
     };
     const onStorageChange = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
@@ -378,7 +379,7 @@ export default function App() {
         } else if (result.error) {
           setGoogleDriveConnection('disconnected');
           setGoogleDriveAuthorizing(false);
-          setGoogleDriveError(result.error);
+          setGoogleDriveError(userError(result.error, 'MI-DRV-002'));
         }
         void chrome.storage.local.remove(GOOGLE_DRIVE_AUTH_RESULT_KEY);
       }
@@ -425,7 +426,7 @@ export default function App() {
       if (!mounted || !result) return;
       const recent = typeof result.completedAt === 'number' && Date.now() - result.completedAt < 2 * 60 * 1000;
       if (!connected && recent && result.error) {
-        setGoogleDriveError(result.error);
+        setGoogleDriveError(userError(result.error, 'MI-DRV-002'));
         setGoogleDriveConnection('disconnected');
       }
       await chrome.storage.local.remove(GOOGLE_DRIVE_AUTH_RESULT_KEY);
@@ -447,7 +448,7 @@ export default function App() {
     const poll = window.setInterval(() => { void syncAtlassianStatus(); }, 1_500);
     const timeout = window.setTimeout(() => {
       setAtlassianAuthorizing(false);
-      setAtlassianError('Atlassian sign-in is still pending. Finish it in the opened tab, then retry.');
+      setAtlassianError(problem('MI-ATL-003'));
     }, 5 * 60_000);
     return () => { window.clearInterval(poll); window.clearTimeout(timeout); };
   }, [atlassianAuthorizing, syncAtlassianStatus]);
@@ -500,9 +501,9 @@ export default function App() {
     void chrome.runtime.sendMessage({ type: 'PREPARE_CAPTURE', tabId }).then((result: { ok?: boolean; error?: string } | undefined) => {
       if (cancelled) return;
       if (result?.ok) setReadyTabId(tabId);
-      else setNotice({ tone: 'error', text: result?.error ?? 'Could not prepare capture.' });
+      else setNotice({ tone: 'error', text: userError(result?.error, 'MI-CAP-004') });
     }).catch((error: unknown) => {
-      if (!cancelled) setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'Could not prepare capture.' });
+      if (!cancelled) setNotice({ tone: 'error', text: userError(error, 'MI-CAP-004') });
     });
     return () => { cancelled = true; };
   }, [activeTab?.id, state.meetingStatus, microphone]);
@@ -510,14 +511,14 @@ export default function App() {
   const requestMicrophone = async () => {
     setBusy(true);
     setMicrophone('requesting');
-    setNotice({ tone: 'info', text: 'Opening Brave’s native microphone permission prompt…' });
+    setNotice({ tone: 'info', text: 'Opening your microphone permission request…' });
     try {
       const tab = await chrome.tabs.create({ url: chrome.runtime.getURL('mic-permission.html'), active: true });
-      if (tab.id === undefined) throw new Error('Brave could not open the microphone permission request.');
+      if (tab.id === undefined) throw new Error(problem('MI-MIC-010'));
       microphoneRequestTabId.current = tab.id;
     } catch (error) {
       setMicrophone('prompt');
-      setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'Could not open Brave’s microphone permission prompt.' });
+      setNotice({ tone: 'error', text: userError(error, 'MI-MIC-010') });
     } finally {
       setBusy(false);
     }
@@ -532,7 +533,7 @@ export default function App() {
       try {
         response = await fetch(GOOGLE_DRIVE_AUTH_START_URL, { cache: 'no-store' });
       } catch {
-        throw new Error('Could not reach the local backend. Make sure it is running, then retry.');
+        throw new Error(problem('MI-CON-001'));
       }
       const payload = await response.json().catch(() => ({})) as {
         connected?: boolean;
@@ -541,26 +542,26 @@ export default function App() {
         detail?: { message?: string };
       };
       if (!response.ok) {
-        throw new Error(payload.detail?.message ?? `Google Drive setup failed (${response.status}).`);
+        throw new Error(httpProblem(response.status, 'MI-DRV-002'));
       }
       if (payload.connected || !payload.authorization_url) {
         setGoogleDriveConnection('connected');
         setGoogleDriveAuthorizing(false);
         return;
       }
-      if (!payload.redirect_uri) throw new Error('The backend did not provide a Google OAuth callback URL.');
+      if (!payload.redirect_uri) throw new Error(problem('MI-DRV-002'));
 
       const authUrl = new URL(payload.authorization_url);
       const callbackUrl = new URL(payload.redirect_uri);
       if (authUrl.origin !== 'https://accounts.google.com') {
-        throw new Error('The backend returned an unexpected Google sign-in address.');
+        throw new Error(problem('MI-DRV-002'));
       }
       if (!['http:', 'https:'].includes(callbackUrl.protocol)) {
-        throw new Error('The Google OAuth callback URL is invalid.');
+        throw new Error(problem('MI-DRV-002'));
       }
 
       const tab = await chrome.tabs.create({ url: authUrl.toString(), active: true });
-      if (tab.id === undefined) throw new Error('Could not open the Google sign-in tab.');
+      if (tab.id === undefined) throw new Error(problem('MI-DRV-002'));
       await chrome.storage.local.set({
         [GOOGLE_DRIVE_AUTH_TAB_KEY]: {
           tabId: tab.id,
@@ -570,7 +571,7 @@ export default function App() {
     } catch (error) {
       setGoogleDriveAuthorizing(false);
       setGoogleDriveConnection('error');
-      setGoogleDriveError(error instanceof Error ? error.message : 'Could not start Google Drive sign-in.');
+      setGoogleDriveError(userError(error, 'MI-DRV-002'));
     } finally {
       setGoogleDriveBusy(false);
     }
@@ -585,17 +586,17 @@ export default function App() {
       const payload = await response.json().catch(() => ({})) as {
         connected?: boolean; authorization_url?: string | null; detail?: { message?: string };
       };
-      if (!response.ok) throw new Error(payload.detail?.message ?? `Atlassian setup failed (${response.status}).`);
+      if (!response.ok) throw new Error(httpProblem(response.status, 'MI-ATL-002'));
       if (payload.connected && !force) { await syncAtlassianStatus(); return; }
-      if (!payload.authorization_url) throw new Error('Atlassian did not provide a sign-in URL.');
+      if (!payload.authorization_url) throw new Error(problem('MI-ATL-002'));
       const url = new URL(payload.authorization_url);
-      if (url.origin !== 'https://auth.atlassian.com') throw new Error('Unexpected Atlassian sign-in address.');
+      if (url.origin !== 'https://auth.atlassian.com') throw new Error(problem('MI-ATL-002'));
       setAtlassianAuthorizing(true);
       await chrome.tabs.create({ url: url.toString(), active: true });
     } catch (error) {
       setAtlassianAuthorizing(false);
       atlassianNeedsWriteRef.current = false;
-      setAtlassianError(error instanceof Error ? error.message : 'Could not start Atlassian sign-in.');
+      setAtlassianError(userError(error, 'MI-ATL-002'));
     } finally {
       setAtlassianBusy(false);
     }
@@ -603,7 +604,7 @@ export default function App() {
 
   const startCapture = async () => {
     if (!activeTab?.id || state.meetingStatus !== 'in-meeting') {
-      setNotice({ tone: 'info', text: 'Join a Google Meet call before starting capture.' });
+      setNotice({ tone: 'info', text: 'Join a Google Meet call before you start listening.' });
       return;
     }
     if (microphone !== 'granted') {
@@ -611,20 +612,20 @@ export default function App() {
       return;
     }
     if (readyTabId !== activeTab.id) {
-      setNotice({ tone: 'info', text: 'Preparing the audio capture. Try again in a moment.' });
+      setNotice({ tone: 'info', text: 'Getting your meeting ready. Try again in a moment.' });
       return;
     }
     setBusy(true);
     setSettingsOpen(false);
-    setNotice({ tone: 'info', text: 'Starting audio-only capture from this Meet tab and your microphone…' });
+    setNotice({ tone: 'info', text: 'Getting ready to listen to your meeting…' });
     // Send immediately so tabCapture runs in the user-initiated message path.
     const request = chrome.runtime.sendMessage({ type: 'START_CAPTURE', tabId: activeTab.id }) as Promise<{ ok?: boolean; error?: string; state?: ExtensionState } | undefined>;
     try {
       const response = await request;
-      if (!response?.ok) setNotice({ tone: 'error', text: response?.error ?? response?.state?.error ?? 'Could not start capture.' });
+      if (!response?.ok) setNotice({ tone: 'error', text: userError(response?.error ?? response?.state?.error, 'MI-CAP-004') });
       else setNotice(undefined);
     } catch (error) {
-      setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'Could not start capture.' });
+      setNotice({ tone: 'error', text: userError(error, 'MI-CAP-004') });
     } finally {
       setBusy(false);
     }
@@ -635,9 +636,9 @@ export default function App() {
     setNotice(undefined);
     try {
       const response = await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }) as { ok?: boolean; error?: string } | undefined;
-      if (!response?.ok) setNotice({ tone: 'error', text: response?.error ?? 'Could not stop capture. Please try again.' });
+      if (!response?.ok) setNotice({ tone: 'error', text: userError(response?.error, 'MI-CAP-005') });
     } catch (error) {
-      setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'Could not stop capture.' });
+      setNotice({ tone: 'error', text: userError(error, 'MI-CAP-005') });
     } finally {
       setBusy(false);
     }
@@ -646,7 +647,7 @@ export default function App() {
   const closePanel = async () => {
     const sidePanel = chrome.sidePanel as unknown as SidePanelCloseApi;
     if (!sidePanel.close) {
-      setNotice({ tone: 'info', text: 'Use the Meeting Intelligence toolbar button to close this panel in this Brave version.' });
+      setNotice({ tone: 'info', text: 'Use the toolbar button to close this panel.' });
       return;
     }
     try {
@@ -661,10 +662,10 @@ export default function App() {
       if (activeTab?.windowId !== undefined) {
         await sidePanel.close({ windowId: activeTab.windowId });
       } else {
-        throw new Error('Could not identify the browser window to close this panel.');
+        throw new Error(problem('MI-APP-003'));
       }
     } catch (error) {
-      setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'Could not close the Meeting Intelligence panel.' });
+      setNotice({ tone: 'error', text: userError(error, 'MI-APP-003') });
     }
   };
 
@@ -673,8 +674,8 @@ export default function App() {
   const capturingElsewhere = running && !capturingHere;
   const inMeeting = isMeetTab(activeTab) && state.meetingStatus === 'in-meeting';
   const statusTitle = capturingHere
-    ? state.captureStatus === 'connecting' ? 'Starting your capture' : 'Listening to your meeting'
-    : capturingElsewhere ? 'Capture active in another tab'
+    ? state.captureStatus === 'connecting' ? 'Getting ready to listen' : 'Listening to your meeting'
+    : capturingElsewhere ? 'Listening in another tab'
       : inMeeting ? 'Ready to listen'
         : state.meetingStatus === 'unknown' && isMeetTab(activeTab) ? 'Connect this Meet tab'
           : 'Ready when you are';
@@ -693,8 +694,8 @@ export default function App() {
     <main className="shell">
       <header className="header">
         <img className="brand-mark" src="/meeting-intelligence-logo.png" alt="" aria-hidden="true" />
-        <div className="brand-copy"><h1>Meeting Intelligence</h1><p>Your meeting companion</p></div>
-        <span className={`live-indicator ${running ? 'is-live' : ''}`} aria-label={running ? 'Capture active' : 'Capture inactive'} />
+        <div className="brand-copy"><h1>Meeting Intelligence</h1><p>Context for your online meetings</p></div>
+        <span className={`live-indicator ${running ? 'is-live' : ''}`} aria-label={running ? 'Listening' : 'Not listening'} />
         <button
             className="settings-button"
             type="button"
@@ -713,38 +714,38 @@ export default function App() {
           <strong>{statusTitle}</strong>
           <span>{running
             ? state.backendConnected ? 'Finding useful context and next steps' : 'Connecting…'
-            : inMeeting ? 'Capture Meet audio and your voice' : isMeetTab(activeTab) ? 'Join the call to enable capture' : 'Open or join Google Meet to get started'}</span>
+            : inMeeting ? 'Listen to the call and your microphone' : isMeetTab(activeTab) ? 'Join the call to start listening' : 'Live listening currently supports Google Meet. More platforms are planned.'}</span>
         </div>
       </section>
 
-      {capturingElsewhere && <p className="context-note">Your audio session is running in another tab. Stop it here before starting a new one.</p>}
+      {capturingElsewhere && <p className="context-note">You’re listening to a meeting in another tab. Stop it here to switch meetings.</p>}
       {state.captureStatus === 'error' && state.error
-        ? <div className="notice error" role="alert">{state.error}</div>
-        : notice && <div className={`notice ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.text}</div>}
+        ? <div className="notice error" role="alert">{userError(state.error, 'MI-CAP-004')}</div>
+        : notice && <div className={`notice ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.tone === 'error' ? userError(notice.text) : notice.text}</div>}
       {state.meetMicrophoneProblem && (
         <div className="notice error" role="alert">
-          Google Meet cannot access its microphone. Click Meet’s microphone warning and allow the selected input device. Meeting Intelligence will keep Meet audio and pending searches running.
+          {problem('MI-MIC-009')}
         </div>
       )}
       {capturingHere && state.audioWarning && (
         <div className={`notice ${state.audioWarning.includes('blocked') ? 'error' : 'info'}`} role="status">
-          {state.audioWarning}
+          {userError(state.audioWarning, 'MI-MIC-004')}
         </div>
       )}
 
       {running && (
         <div className="actions">
           <button className="stop-button" onClick={stopCapture} disabled={busy}>
-            <span className="stop-square" aria-hidden="true" />{busy ? 'Stopping…' : 'Stop capture'}
+            <span className="stop-square" aria-hidden="true" />{busy ? 'Stopping…' : 'Stop listening'}
           </button>
         </div>
       )}
 
       {!running && <div className="actions">
           <button className="start-button" onClick={startCapture} disabled={busy || !inMeeting || microphone !== 'granted' || readyTabId !== activeTab?.id}>
-            {busy ? 'Starting…' : readyTabId !== activeTab?.id && inMeeting && microphone === 'granted' ? 'Preparing…' : state.captureStatus === 'error' ? 'Retry capture' : 'Start capture'}
+            {busy ? 'Starting…' : readyTabId !== activeTab?.id && inMeeting && microphone === 'granted' ? 'Preparing…' : state.captureStatus === 'error' ? 'Try listening again' : 'Start listening'}
           </button>
-        <p className="action-hint">{!inMeeting ? 'Capture is only available inside an active Meet call.' : microphone === 'checking' ? 'Checking microphone access…' : microphone !== 'granted' ? 'Enable microphone access to continue.' : 'Only Meet tab audio and your microphone will be captured.'}</p>
+        <p className="action-hint">{!inMeeting ? 'Join a Google Meet call to start listening.' : microphone === 'checking' ? 'Checking microphone access…' : microphone !== 'granted' ? 'Enable your microphone to include your voice.' : 'You control when listening starts and stops.'}</p>
       </div>}
 
       <section className="timeline-section" aria-labelledby="timeline-heading">
@@ -757,7 +758,7 @@ export default function App() {
         </div>
         <div className="timeline-scroll" ref={timelineScrollRef}>
           {timelineItems.length === 0 ? (
-            <div className="timeline-empty"><span className="empty-symbol" aria-hidden="true">✦</span><strong>{running ? "Listening for useful context" : "A little context goes a long way"}</strong><p>{running ? "Related files and suggested tasks appear here as your meeting unfolds." : "Start capture in a Meet call to find related files and turn next steps into tasks."}</p></div>
+            <div className="timeline-empty"><span className="empty-symbol" aria-hidden="true">✦</span><strong>{running ? "Listening for useful context" : "A little context goes a long way"}</strong><p>{running ? "Related files and suggested tasks appear here as your meeting unfolds." : "Start listening in a Meet call to find related files and turn next steps into tasks."}</p></div>
           ) : (
             <ol className="timeline-list">
               {timelineItems.map((item) => (
@@ -809,15 +810,15 @@ export default function App() {
             <div>
               <h2>Google Drive</h2>
               <p>{googleDriveConnection === 'connected'
-                ? 'Connected for related file search'
+                ? 'Find related files during your meetings'
                 : googleDriveAuthorizing ? 'Finish sign-in in the Google tab'
                   : googleDriveConnection === 'checking' ? 'Checking connection…'
-                    : 'Connect once to find files mentioned in meetings'}</p>
+                    : 'Connect to find related files during your meetings'}</p>
             </div>
           </div>
           {googleDriveConnection === 'connected' && <span className="drive-connected-badge">Connected</span>}
         </div>
-        {googleDriveError && <p className="drive-error" role="status">{googleDriveError}</p>}
+        {googleDriveError && <p className="drive-error" role="status">{userError(googleDriveError, 'MI-DRV-001')}</p>}
         {googleDriveConnection !== 'connected' && (
           <button
             className="drive-connect-button"
@@ -837,23 +838,23 @@ export default function App() {
           <div className="section-heading">
             <span className={`drive-icon ${atlassianConnection === 'connected' ? 'enabled' : ''}`} aria-hidden="true">A</span>
             <div>
-              <h2>Atlassian</h2>
+              <h2>Jira & Confluence</h2>
               <p>{atlassianConnection === 'connected'
                 ? `Searching ${atlassianSources.includes('confluence') ? 'Jira and Confluence' : 'Jira'}${atlassianSite ? ` · ${new URL(atlassianSite).hostname}` : ''}`
-                : atlassianAuthorizing ? 'Finish sign-in in the Atlassian tab'
+                : atlassianAuthorizing ? 'Finish in the sign-in tab'
                   : atlassianConnection === 'checking' ? 'Checking connection…'
-                    : atlassianConnection === 'error' ? 'Connection check unavailable'
+                    : atlassianConnection === 'error' ? 'We couldn’t check your connection'
                     : atlassianConfigured ? 'Connect to find issues and pages mentioned in meetings'
-                      : 'Add Atlassian OAuth credentials to the local backend'}</p>
+                      : problem('MI-ATL-004')}</p>
             </div>
           </div>
           {atlassianConnection === 'connected' && <span className="drive-connected-badge">Connected</span>}
         </div>
-        {atlassianError && <p className="drive-error" role="status">{atlassianError}</p>}
+        {atlassianError && <p className="drive-error" role="status">{userError(atlassianError, 'MI-ATL-001')}</p>}
         {atlassianConnection !== 'connected' && (
           <button className="drive-connect-button" onClick={() => atlassianConnection === 'error' ? void syncAtlassianStatus() : void connectAtlassian()}
             disabled={atlassianBusy || atlassianAuthorizing || atlassianConnection === 'checking'}>
-            {atlassianBusy ? 'Opening Atlassian sign-in…' : atlassianAuthorizing ? 'Waiting for Atlassian sign-in…' : atlassianConnection === 'error' ? 'Retry connection check' : 'Connect Atlassian'}
+            {atlassianBusy ? 'Opening sign-in…' : atlassianAuthorizing ? 'Waiting for sign-in…' : atlassianConnection === 'error' ? 'Retry connection check' : 'Connect Jira & Confluence'}
           </button>
         )}
       </section>
@@ -865,8 +866,8 @@ export default function App() {
         </div>
         {microphone === 'denied' && (
           <div className="permission-help" role="note">
-            <strong>Brave will ask for microphone access</strong>
-            <p>Press the button here to open Brave’s standard microphone prompt. If no prompt appears, check <code>brave://extensions</code> → Meeting Intelligence → Details → Site settings → Microphone.</p>
+            <strong>Allow microphone access</strong>
+            <p>Select Enable microphone and allow access in your browser. If the request doesn’t appear, check <code>brave://extensions</code> → Meeting Intelligence → Details → Site settings → Microphone.</p>
             <p>After you allow access, the request tab closes and this panel updates automatically.</p>
           </div>
         )}
@@ -875,14 +876,14 @@ export default function App() {
             {microphone === 'requesting' ? 'Waiting for permission…' : microphone === 'denied' ? 'Retry microphone access' : 'Enable microphone'}
           </button>
         )}
-        <p className="privacy-note">Audio stays in your local capture pipeline. Capture continues when you close this panel.</p>
+        <p className="privacy-note">Listening continues when you close this panel. Select Stop listening to end it. Your audio is transcribed to find relevant content.</p>
       </section>
       </div>}
 
 
       <footer className="footer">
         <span title={`Version ${extensionVersion}`}>{activeTab?.title ? activeTab.title.length > 42 ? `${activeTab.title.slice(0, 39)}…` : activeTab.title : 'Active browser tab'}</span>
-        <button className="refresh-button" onClick={() => void refresh()} aria-label="Refresh status" title="Refresh status">↻</button>
+        <button className="refresh-button" onClick={() => void refresh()} aria-label="Check connection" title="Check connection">↻</button>
       </footer>
     </main>
   );
