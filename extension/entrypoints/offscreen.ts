@@ -201,6 +201,7 @@ async function start(streamId: string, sessionId: string) {
       microphoneUnavailableChecks = 0;
       nextMicrophoneRecoveryAt = 0;
       await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: true }).catch(() => undefined);
+      if (stopping || generation !== captureGeneration) return;
       notify({ audioWarning: undefined });
     } catch (error) {
       if (stopping || generation !== captureGeneration) return;
@@ -213,11 +214,13 @@ async function start(streamId: string, sessionId: string) {
           .then((permission) => permission.state)
           .catch(() => undefined);
       }
+      if (stopping || generation !== captureGeneration) return;
       // A transient NotAllowedError from an automatic background reopen is
       // not proof that the user revoked a previously granted permission.
       if (permissionState === 'denied') {
         await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: false }).catch(() => undefined);
       }
+      if (stopping || generation !== captureGeneration) return;
       notify({
         audioWarning: permissionState === 'denied'
           ? 'Microphone access is blocked for Meeting Intelligence. Stop capture, enable microphone once, then restart.'
@@ -237,6 +240,10 @@ async function start(streamId: string, sessionId: string) {
       void stop();
       return;
     }
+    if (sessionContext.state !== 'running') {
+      void sessionContext.resume().catch(() => undefined);
+      notify({ audioWarning: 'Audio input paused. Trying to resume…' });
+    }
     const microphoneTracks = microphoneStream?.getAudioTracks() ?? [];
     const microphoneEnded = microphoneStream?.active !== true || microphoneTracks.length === 0
       || microphoneTracks.every((track) => track.readyState === 'ended');
@@ -253,11 +260,6 @@ async function start(streamId: string, sessionId: string) {
       return;
     }
     microphoneUnavailableChecks = 0;
-    if (sessionContext.state !== 'running') {
-      void sessionContext.resume().catch(() => undefined);
-      notify({ audioWarning: 'Audio input paused. Trying to resume…' });
-      return;
-    }
     if (recoveringMicrophone) return;
     const hasAudio = level(microphoneAnalyser) > 0.001 || level(tabAnalyser) > 0.001;
     if (hasAudio) quietSince = Date.now();

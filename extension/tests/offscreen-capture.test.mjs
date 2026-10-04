@@ -4,13 +4,14 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 
-function harness({ failReplacementName, permissionState = 'prompt' } = {}) {
+function harness({ failReplacementName, permissionState = 'prompt', deferReplacement = false } = {}) {
   const messages = [], timeouts = new Map(), intervals = new Map(), sockets = [], recorders = [], contexts = [];
   let listener, timer = 0;
   const track = () => ({ readyState: 'live', muted: false, enabled: true, stop() { this.readyState = 'ended'; } });
   const stream = () => { const audio = track(); return { active: true, getTracks: () => [audio], getAudioTracks: () => [audio], getVideoTracks: () => [] }; };
   const tab = stream(), microphone = stream(), replacement = stream();
-  let micRequests = 0;
+  let micRequests = 0, resolveReplacement;
+  const pendingReplacement = new Promise(resolve => { resolveReplacement = resolve; });
   class Socket {
     static OPEN = 1;
     readyState = 1;
@@ -48,6 +49,7 @@ function harness({ failReplacementName, permissionState = 'prompt' } = {}) {
     navigator: { mediaDevices: { async getUserMedia(options) {
       if (options.audio.mandatory) return tab;
       if (++micRequests === 1) return microphone;
+      if (deferReplacement) return pendingReplacement;
       if (failReplacementName) throw new DOMException('Microphone reopen failed', failReplacementName);
       return replacement;
     } }, permissions: { async query() { return { state: permissionState }; } } },
@@ -56,6 +58,7 @@ function harness({ failReplacementName, permissionState = 'prompt' } = {}) {
     setInterval(callback) { intervals.set(++timer, callback); return timer; }, clearInterval(id) { intervals.delete(id); },
   });
   return { messages, sockets, recorders, contexts, microphone, replacement, intervals,
+    resolveReplacement: () => resolveReplacement(replacement),
     send: message => new Promise(resolve => listener(message, {}, resolve)),
     window() { const [id, callback] = timeouts.entries().next().value; timeouts.delete(id); callback(); },
     health() { for (const callback of intervals.values()) callback(); },
@@ -154,4 +157,47 @@ test('an explicit denied permission state clears remembered microphone access', 
   assert.deepEqual(permissionUpdates.map(message => message.granted), [true, false]);
   assert.match(h.messages.at(-1).state.audioWarning, /blocked/);
   await h.send({ type: 'STOP_OFFSCREEN' });
+});
+
+test('a disconnected microphone still resumes a suspended mixer', async () => {
+  const h = harness({ failReplacementName: 'NotReadableError' });
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
+  h.contexts[0].state = 'suspended';
+  h.microphone.getTracks()[0].readyState = 'ended';
+  h.health();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.contexts[0].state, 'running');
+  assert.equal(h.sockets[0].readyState, 1);
+  h.window();
+  assert.equal(h.sockets[0].sent.length, 1);
+  await h.send({ type: 'STOP_OFFSCREEN' });
+});
+
+test('a brief mute resolves without reopening the microphone', async () => {
+  const h = harness();
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
+  const track = h.microphone.getTracks()[0];
+  track.muted = true;
+  h.health();
+  h.health();
+  track.muted = false;
+  h.health();
+  assert.equal(track.readyState, 'live');
+  assert.equal(h.messages.at(-1).state.audioWarning, undefined);
+  await h.send({ type: 'STOP_OFFSCREEN' });
+});
+
+test('stopping while microphone recovery is pending releases the late replacement', async () => {
+  const h = harness({ deferReplacement: true });
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
+  h.microphone.getTracks()[0].readyState = 'ended';
+  h.health();
+  await h.send({ type: 'STOP_OFFSCREEN' });
+  const messageCount = h.messages.length;
+  h.resolveReplacement();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.replacement.getTracks()[0].readyState, 'ended');
+  assert.equal(h.contexts[0].state, 'closed');
+  assert.equal(h.sockets[0].readyState, 3);
+  assert.equal(h.messages.length, messageCount);
 });
