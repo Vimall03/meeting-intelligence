@@ -9,10 +9,9 @@ dependencies = [
     "PyJWT[crypto]>=2.10.1",
     "cryptography>=45.0.0",
     "fastapi[standard]>=0.141.1",
-    "faster-whisper>=1.2.1",
+    "numpy>=2.0.0",
     "httpx>=0.28.1",
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.3",
     "websockets>=17.1",
-    "whisperx>=3.8.6",
 ]

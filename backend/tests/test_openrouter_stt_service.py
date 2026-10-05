@@ -11,11 +11,11 @@ import httpx
 import numpy as np
 
 from app.services.openrouter_stt_service import OpenRouterTranscriptionService
-from whisperx.audio import SAMPLE_RATE
+from app.services.audio_decode import SAMPLE_RATE
 
 
 class OpenRouterTranscriptionServiceTests(unittest.TestCase):
-    def test_transcribes_webm_and_returns_whisperx_compatible_shape(self) -> None:
+    def test_transcribes_webm_and_returns_timestamped_segments(self) -> None:
         def respond(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.headers["authorization"], "Bearer test-key")
             payload = json.loads(request.content)
@@ -46,7 +46,7 @@ class OpenRouterTranscriptionServiceTests(unittest.TestCase):
                 transport=httpx.MockTransport(respond),
             )
             with patch(
-                "app.services.openrouter_stt_service.whisperx.load_audio",
+                "app.services.openrouter_stt_service.load_audio",
                 return_value=np.zeros(SAMPLE_RATE, dtype=np.float32),
             ):
                 result = service.transcribe(str(path))
@@ -72,7 +72,7 @@ class OpenRouterTranscriptionServiceTests(unittest.TestCase):
                 transport=httpx.MockTransport(respond),
             )
             with patch(
-                "app.services.openrouter_stt_service.whisperx.load_audio",
+                "app.services.openrouter_stt_service.load_audio",
                 return_value=np.zeros(SAMPLE_RATE * 2, dtype=np.float32),
             ):
                 result = service.transcribe(str(path))

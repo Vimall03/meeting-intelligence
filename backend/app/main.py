@@ -11,7 +11,6 @@ from fastapi.exceptions import RequestValidationError
 from app.api.routes.google_drive import router as google_drive_router
 from app.api.routes.atlassian import router as atlassian_router
 from app.api.routes.health import router as health_router
-from app.api.routes.transcription import router as transcription_router
 from app.api.routes.meeting_stream import router as meeting_stream_router
 from app.api.routes.session import router as session_router
 from app.core.config import settings
@@ -65,5 +64,5 @@ async def storage_conflict(request: Request, exc):
     return await safe_failure(request, exc)
 
 
-for router in (health_router, transcription_router, meeting_stream_router, google_drive_router, atlassian_router, session_router):
+for router in (health_router, meeting_stream_router, google_drive_router, atlassian_router, session_router):
     app.include_router(router)

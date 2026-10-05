@@ -4,8 +4,7 @@ import wave
 
 import httpx
 import numpy as np
-import whisperx
-from whisperx.audio import SAMPLE_RATE
+from app.services.audio_decode import SAMPLE_RATE, load_audio
 
 from app.core.config import settings
 
@@ -24,7 +23,7 @@ class OpenRouterTranscriptionService:
         self.transport = transport
 
     def transcribe(self, file_path: str, start_seconds: float = 0.0) -> dict:
-        audio = whisperx.load_audio(file_path)
+        audio = load_audio(file_path)
         audio_duration = len(audio) / SAMPLE_RATE
         chunk_start = min(max(start_seconds, 0.0), audio_duration)
         if not len(audio) or chunk_start >= audio_duration:
