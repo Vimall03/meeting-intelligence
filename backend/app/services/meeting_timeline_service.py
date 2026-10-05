@@ -12,12 +12,18 @@ class MeetingTimelineService:
     def __init__(self) -> None:
         self.session_id = uuid4().hex
         self._items: list[dict[str, Any]] = []
+        self._revision = 0
+
+    def restore(self, snapshot: dict[str, Any]) -> None:
+        self.session_id = snapshot['session_id']
+        self._revision = snapshot['revision']
+        self._items = deepcopy(list(reversed(snapshot['items'])))
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "type": "timeline_snapshot",
             "session_id": self.session_id,
-            "revision": len(self._items),
+            "revision": self._revision,
             "items": deepcopy(list(reversed(self._items))),
         }
 
@@ -62,7 +68,8 @@ class MeetingTimelineService:
         )
 
     def _append(self, data: dict[str, Any]) -> dict[str, Any]:
-        sequence = len(self._items) + 1
+        self._revision += 1
+        sequence = self._revision
         item = {
             "id": f"{self.session_id}:{sequence}",
             "sequence": sequence,
@@ -70,4 +77,5 @@ class MeetingTimelineService:
             **data,
         }
         self._items.append(item)
+        self._items = self._items[-100:]
         return item

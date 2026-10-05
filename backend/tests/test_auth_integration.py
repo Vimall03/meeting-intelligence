@@ -58,6 +58,21 @@ class AuthIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.db.put('REVOKED#family-A', {'expiresAt': int(time.time()) + 86400})
         with self.assertRaises(HTTPException): await auth.verify(self.token(), self.db)
         self.assertEqual((await auth.verify(self.token('B'), self.db)).sub, 'B')
+
+    async def test_public_key_outage_does_not_invalidate_session(self):
+        def unavailable(_token):
+            raise jwt.exceptions.PyJWKClientConnectionError('offline')
+        with patch.object(auth, 'jwks', lambda _: SimpleNamespace(get_signing_key_from_jwt=unavailable)):
+            with self.assertRaises(HTTPException) as result:
+                await auth.verify(self.token(), self.db)
+        self.assertEqual(result.exception.status_code, 503)
+
+    async def test_ticket_database_outage_returns_retryable_failure(self):
+        async def unavailable(_key): raise RuntimeError('offline')
+        with patch.object(self.db, 'get', unavailable):
+            with self.assertRaises(HTTPException) as result:
+                await auth.consume_ticket('opaque-ticket', self.db)
+        self.assertEqual(result.exception.status_code, 503)
     async def test_credentials_encrypted_isolated_without_otp_ttl(self):
         a, b = await self.seed('A'), await self.seed('B')
         self.assertEqual((await a.read())['access_token'], 'A-private-access'); self.assertEqual((await b.read())['access_token'], 'B-private-access')

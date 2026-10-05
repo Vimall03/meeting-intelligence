@@ -1,4 +1,6 @@
 import logging
+from contextlib import asynccontextmanager
+from app.services.meeting_sessions import MeetingConnections
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -16,7 +18,14 @@ from app.core.config import settings
 from app.core.user_messages import product_error
 from app.services.user_store import UserStore, StoreConflict
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app):
+    app.state.meetings = MeetingConnections()
+    yield
+    await app.state.meetings.drain()
+
+
+app = FastAPI(lifespan=lifespan)
 if settings.extension_origin:
     app.add_middleware(CORSMiddleware, allow_origins=[settings.extension_origin],
         allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Authorization', 'Content-Type', 'Idempotency-Key'])

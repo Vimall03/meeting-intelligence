@@ -12,6 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import settings
 from app.core.user_messages import product_error
+from app.services.user_store import StoreConflict
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -51,6 +52,8 @@ async def verify(token, db):
         return principal
     except HTTPException:
         raise
+    except jwt.exceptions.PyJWKClientConnectionError:
+        raise failure('MI-AUTH-104', 503) from None
     except jwt.PyJWTError:
         raise failure() from None
     except Exception:
@@ -93,5 +96,7 @@ async def consume_ticket(ticket, db):
         return principal
     except HTTPException:
         raise
-    except Exception:
+    except StoreConflict:
         raise failure() from None
+    except Exception:
+        raise failure('MI-AUTH-104', 503) from None
