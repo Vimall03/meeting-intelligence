@@ -1,5 +1,7 @@
 import { defineConfig } from 'wxt';
 
+const backendOrigin = new URL(process.env.WXT_BACKEND_URL || 'http://localhost:8000').origin;
+const authOrigin = process.env.WXT_AUTH_API_URL ? new URL(process.env.WXT_AUTH_API_URL).origin : undefined;
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
@@ -7,7 +9,7 @@ export default defineConfig({
     description: 'Find related files and turn online meeting follow-ups into Jira tasks. Live capture currently supports Google Meet.',
     version: '0.1.8',
     permissions: ['activeTab', 'tabCapture', 'offscreen', 'storage', 'sidePanel', 'scripting'],
-    host_permissions: ['https://meet.google.com/*', 'http://localhost:8000/*'],
+    host_permissions: ['https://meet.google.com/*', `${backendOrigin}/*`, ...(authOrigin ? [`${authOrigin}/*`] : [])],
     icons: {
       16: 'meeting-intelligence-icon-16.png',
       32: 'meeting-intelligence-icon-32.png',

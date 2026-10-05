@@ -1,10 +1,11 @@
+import { authenticatedFetch } from './http.ts';
 import { problem, httpProblem } from './user-messages.ts';
 export type JiraProject = { id: string; key: string; name: string };
 export type CreatedJiraTask = { key: string; url: string; project_key: string };
 
 type ErrorPayload = { detail?: { message?: string } };
 
-export async function loadJiraProjects(url: string, fetcher: typeof fetch = fetch): Promise<JiraProject[]> {
+export async function loadJiraProjects(url: string, fetcher: typeof fetch = authenticatedFetch): Promise<JiraProject[]> {
   const response = await fetcher(url, { cache: 'no-store' }).catch(() => {
     throw new Error(problem('MI-CON-001'));
   });
@@ -16,7 +17,7 @@ export async function loadJiraProjects(url: string, fetcher: typeof fetch = fetc
   return payload.projects;
 }
 
-export async function submitJiraTask(url: string, task: { project_id: string; title: string; description: string }, fetcher: typeof fetch = fetch): Promise<CreatedJiraTask> {
+export async function submitJiraTask(url: string, task: { project_id: string; title: string; description: string; site_url?: string }, fetcher: typeof fetch = authenticatedFetch): Promise<CreatedJiraTask> {
   const response = await fetcher(url, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(task),

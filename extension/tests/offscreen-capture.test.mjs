@@ -18,8 +18,8 @@ function harness({ failReplacementName, permissionState = 'prompt', deferReplace
     readyState = 1;
     sent = [];
     constructor() { sockets.push(this); }
-    send(value) { this.sent.push(value); }
-    close() { this.readyState = 3; this.onclose?.(); }
+    send(value) { if (typeof value === 'string') { queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'auth_ready', expiresAt: Math.floor(Date.now() / 1000) + 900, expiresIn: 900 }) })); } else this.sent.push(value); }
+    close() { this.readyState = 3; this.onclose?.({ code: 1000 }); }
   }
   class Recorder {
     static isTypeSupported() { return true; }
@@ -46,7 +46,7 @@ function harness({ failReplacementName, permissionState = 'prompt', deferReplace
   const source = fs.readFileSync(new URL('../entrypoints/offscreen.ts', import.meta.url), 'utf8');
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
     exports: {}, require(name) { if (name.includes('user-messages')) return userMessages; return name.includes('config') ? { AUDIO_MIME_TYPE: 'audio/webm', AUDIO_WINDOW_MS: 3000, MEETING_SOCKET_URL: 'ws://localhost' } : { isTimelineSnapshot: message => message.type === 'timeline_snapshot' }; },
-    defineUnlistedScript: callback => callback(), DOMException, Error, MediaRecorder: Recorder, WebSocket: Socket, AudioContext: Context,
+    defineUnlistedScript: callback => callback(), queueMicrotask, DOMException, Error, MediaRecorder: Recorder, WebSocket: Socket, AudioContext: Context,
     navigator: { mediaDevices: { async getUserMedia(options) {
       if (options.audio.mandatory) return tab;
       if (++micRequests === 1) return microphone;
@@ -54,14 +54,15 @@ function harness({ failReplacementName, permissionState = 'prompt', deferReplace
       if (failReplacementName) throw new DOMException('Microphone reopen failed', failReplacementName);
       return replacement;
     } }, permissions: { async query() { return { state: permissionState }; } } },
-    chrome: { runtime: { onMessage: { addListener(callback) { listener = callback; } }, async sendMessage(message) { messages.push(message); } } },
-    setTimeout(callback) { timeouts.set(++timer, callback); return timer; }, clearTimeout(id) { timeouts.delete(id); },
+    chrome: { runtime: { onMessage: { addListener(callback) { listener = callback; } }, async sendMessage(message) { messages.push(message); if (message.type === 'MEETING_TICKET') return { ok: true, ticket: 'ticket' }; } } },
+    setTimeout(callback, delay) { timeouts.set(++timer, { callback, delay }); return timer; }, clearTimeout(id) { timeouts.delete(id); },
     setInterval(callback) { intervals.set(++timer, callback); return timer; }, clearInterval(id) { intervals.delete(id); },
   });
   return { messages, sockets, recorders, contexts, microphone, replacement, intervals,
     resolveReplacement: () => resolveReplacement(replacement),
-    send: message => new Promise(resolve => listener(message, {}, resolve)),
-    window() { const [id, callback] = timeouts.entries().next().value; timeouts.delete(id); callback(); },
+    send: async message => { const result = await new Promise(resolve => listener(message, {}, resolve)); if (message.type === 'START_OFFSCREEN') { sockets.at(-1).onopen(); await new Promise(resolve => setImmediate(resolve)); } return result; },
+    window() { const [id, { callback }] = [...timeouts.entries()].find(([, task]) => task.delay === 3000); timeouts.delete(id); callback(); },
+    renew() { const [id, { callback }] = [...timeouts.entries()].find(([, task]) => task.delay > 10000); timeouts.delete(id); callback(); },
     health() { for (const callback of intervals.values()) callback(); },
   };
 }
@@ -201,4 +202,36 @@ test('stopping while microphone recovery is pending releases the late replacemen
   assert.equal(h.contexts[0].state, 'closed');
   assert.equal(h.sockets[0].readyState, 3);
   assert.equal(h.messages.length, messageCount);
+});
+
+
+test('authorization renewal preserves the same microphone, mixer, recorder and socket', async () => {
+  const h = harness();
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
+  const socket = h.sockets[0], mixer = h.contexts[0], recorder = h.recorders[0];
+  h.window();
+  h.renew();
+  await new Promise(resolve => setImmediate(resolve));
+  h.window();
+  assert.equal(h.sockets.length, 1);
+  assert.equal(h.contexts.length, 1);
+  assert.equal(h.recorders.length, 1);
+  assert.equal(h.sockets[0], socket);
+  assert.equal(h.contexts[0], mixer);
+  assert.equal(h.recorders[0], recorder);
+  assert.equal(h.microphone.getTracks()[0].readyState, 'live');
+  assert.equal(socket.sent.length, 2);
+  await h.send({ type: 'STOP_OFFSCREEN' });
+});
+
+
+test('server-relative lifetime avoids renewal loops when the device clock differs', async () => {
+  const h = harness();
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
+  h.sockets[0].onmessage({ data: JSON.stringify({ type: 'auth_ready', expiresAt: 1, expiresIn: 900 }) });
+  h.renew(); await new Promise(resolve => setImmediate(resolve)); h.window();
+  assert.equal(h.sockets[0].readyState, 1);
+  assert.equal(h.microphone.getTracks()[0].readyState, 'live');
+  assert.equal(h.sockets[0].sent.length, 1);
+  await h.send({ type: 'STOP_OFFSCREEN' });
 });

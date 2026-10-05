@@ -1,6 +1,13 @@
-// Keep this in one place so the local endpoint can be replaced later.
-export const MEETING_SOCKET_URL = 'ws://localhost:8000/ws/meeting';
-export const BACKEND_HTTP_BASE_URL = 'http://localhost:8000';
+// Public build configuration. Only loopback development hosts may use HTTP.
+function secureBase(value: string) {
+  if (!value) return '';
+  const url = new URL(value);
+  if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))) throw new Error('Invalid service configuration');
+  return value.replace(/\/$/, '');
+}
+export const BACKEND_HTTP_BASE_URL = secureBase(import.meta.env.WXT_BACKEND_URL || 'http://localhost:8000');
+export const AUTH_API_URL = secureBase(import.meta.env.WXT_AUTH_API_URL || '');
+export const MEETING_SOCKET_URL = `${BACKEND_HTTP_BASE_URL.replace(/^http/, 'ws')}/ws/meeting`;
 export const GOOGLE_DRIVE_STATUS_URL = `${BACKEND_HTTP_BASE_URL}/api/integrations/google-drive/status`;
 export const GOOGLE_DRIVE_AUTH_START_URL = `${BACKEND_HTTP_BASE_URL}/api/integrations/google-drive/auth/start`;
 export const GOOGLE_DRIVE_AUTH_TAB_KEY = 'googleDriveOAuthPending';

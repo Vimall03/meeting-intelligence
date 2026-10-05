@@ -60,6 +60,13 @@ export interface ExtensionState {
 }
 
 export type ExtensionMessage =
+  | { type: 'AUTH_STATE' }
+  | { type: 'AUTH_REQUEST'; email: string }
+  | { type: 'AUTH_VERIFY'; code: string }
+  | { type: 'AUTH_LOGOUT' }
+  | { type: 'AUTH_FETCH'; url: string; method?: string; body?: string }
+  | { type: 'MEETING_TICKET' }
+  | { type: 'AUTH_CHANGED' }
   | { type: 'MEETING_STATUS'; status: MeetingStatus; meetingId?: string; meetMicrophoneProblem?: boolean; tabId: number }
   | { type: 'GET_MEETING_STATUS' }
   | { type: 'CHECK_MEETING_TAB'; tabId: number }

@@ -1,3 +1,6 @@
+import { AuthGate } from './AuthGate';
+import { closeSidePanel } from '../../lib/side-panel';
+import { authenticatedFetch as fetch } from '../../lib/http';
 import { problem, userError, httpProblem, microphoneProblem } from '../../lib/user-messages';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ExtensionMessage, ExtensionState, MeetingStatus, TaskSuggestionItem } from '../../lib/types';
@@ -54,8 +57,8 @@ async function readAtlassianStatus(): Promise<{ connected: boolean; configured: 
     sources: payload.sources ?? [], can_create_tasks: payload.can_create_tasks === true };
 }
 
-function TaskSuggestionCard({ item, connected, canCreate, connecting, onConnect }: {
-  item: TaskSuggestionItem;
+function TaskSuggestionCard({ item, connected, canCreate, connecting, onConnect, siteUrl }: {
+  item: TaskSuggestionItem; siteUrl?: string;
   connected: boolean;
   canCreate: boolean;
   connecting: boolean;
@@ -95,7 +98,7 @@ function TaskSuggestionCard({ item, connected, canCreate, connecting, onConnect 
     setError(undefined);
     try {
       const payload = await submitJiraTask(ATLASSIAN_JIRA_TASKS_URL, {
-        project_id: projectId, title: title.trim(), description: description.trim(),
+        project_id: projectId, site_url: siteUrl, title: title.trim(), description: description.trim(),
       });
       setCreated({ key: payload.key, url: payload.url });
       setOpen(false);
@@ -206,11 +209,7 @@ async function readMicrophonePermission(): Promise<PermissionState | undefined> 
   }
 }
 
-type SidePanelCloseApi = {
-  close?: (options: { tabId?: number; windowId?: number }) => Promise<void>;
-};
-
-export default function App() {
+function MeetingApp({ userId }: { userId: string }) {
   const extensionVersion = chrome.runtime.getManifest().version;
   const [state, setState] = useState(initialState);
   const [activeTab, setActiveTab] = useState<chrome.tabs.Tab>();
@@ -222,6 +221,7 @@ export default function App() {
   const [atlassianConnection, setAtlassianConnection] = useState<GoogleDriveConnection>('checking');
   const [atlassianConfigured, setAtlassianConfigured] = useState(false);
   const [atlassianSite, setAtlassianSite] = useState<string>();
+  const [sites, setSites] = useState<{ id: string; name: string; url: string }[]>([]);
   const [atlassianSources, setAtlassianSources] = useState<string[]>([]);
   const [atlassianCanCreateTasks, setAtlassianCanCreateTasks] = useState(false);
   const [atlassianAuthorizing, setAtlassianAuthorizing] = useState(false);
@@ -322,6 +322,10 @@ export default function App() {
       setAtlassianConnection(status.connected ? 'connected' : 'disconnected');
       setAtlassianConfigured(status.configured);
       setAtlassianSite(status.site_url);
+      if (status.connected) {
+        const response = await fetch(`${ATLASSIAN_STATUS_URL.replace(/\/status$/, '')}/sites`);
+        if (response.ok) setSites((await response.json()).sites ?? []);
+      } else setSites([]);
       setAtlassianSources(status.sources);
       setAtlassianCanCreateTasks(status.can_create_tasks);
       if (status.connected && (!atlassianNeedsWriteRef.current || status.can_create_tasks)) {
@@ -564,6 +568,7 @@ export default function App() {
       if (tab.id === undefined) throw new Error(problem('MI-DRV-002'));
       await chrome.storage.local.set({
         [GOOGLE_DRIVE_AUTH_TAB_KEY]: {
+          userId,
           tabId: tab.id,
           redirectUri: callbackUrl.toString(),
         },
@@ -645,25 +650,8 @@ export default function App() {
   };
 
   const closePanel = async () => {
-    const sidePanel = chrome.sidePanel as unknown as SidePanelCloseApi;
-    if (!sidePanel.close) {
-      setNotice({ tone: 'info', text: 'Use the toolbar button to close this panel.' });
-      return;
-    }
     try {
-      if (activeTab?.id !== undefined) {
-        try {
-          await sidePanel.close({ tabId: activeTab.id });
-          return;
-        } catch {
-          // A global panel may need to be closed by window ID instead.
-        }
-      }
-      if (activeTab?.windowId !== undefined) {
-        await sidePanel.close({ windowId: activeTab.windowId });
-      } else {
-        throw new Error(problem('MI-APP-003'));
-      }
+      await closeSidePanel();
     } catch (error) {
       setNotice({ tone: 'error', text: userError(error, 'MI-APP-003') });
     }
@@ -772,7 +760,7 @@ export default function App() {
                       <>
                         <h3>{item.title}</h3>
                         <p className="timeline-description">{item.description}</p>
-                        <TaskSuggestionCard item={item} connected={atlassianConnection === 'connected'} canCreate={atlassianCanCreateTasks} connecting={atlassianBusy || atlassianAuthorizing || atlassianConnection === 'checking'} onConnect={(force) => { void connectAtlassian(force); }} />
+                        <TaskSuggestionCard key={`${item.id}:${atlassianSite}`} siteUrl={atlassianSite} item={item} connected={atlassianConnection === 'connected'} canCreate={atlassianCanCreateTasks} connecting={atlassianBusy || atlassianAuthorizing || atlassianConnection === 'checking'} onConnect={(force) => { void connectAtlassian(force); }} />
                       </>
                     ) : (
                       <>
@@ -818,6 +806,12 @@ export default function App() {
           </div>
           {googleDriveConnection === 'connected' && <span className="drive-connected-badge">Connected</span>}
         </div>
+        {googleDriveConnection === 'connected' && <button className="drive-connect-button" disabled={googleDriveBusy} onClick={() => {
+          setGoogleDriveBusy(true);
+          void fetch(`${GOOGLE_DRIVE_STATUS_URL.replace(/\/status$/, '')}/disconnect`, { method: 'POST', body: '{}' })
+            .then(async response => { if (!response.ok) throw new Error(problem('MI-DRV-001')); await syncGoogleDriveStatus(); })
+            .catch(cause => setGoogleDriveError(userError(cause, 'MI-DRV-001'))).finally(() => setGoogleDriveBusy(false));
+        }}>Disconnect Google Drive</button>}
         {googleDriveError && <p className="drive-error" role="status">{userError(googleDriveError, 'MI-DRV-001')}</p>}
         {googleDriveConnection !== 'connected' && (
           <button
@@ -840,7 +834,7 @@ export default function App() {
             <div>
               <h2>Jira & Confluence</h2>
               <p>{atlassianConnection === 'connected'
-                ? `Searching ${atlassianSources.includes('confluence') ? 'Jira and Confluence' : 'Jira'}${atlassianSite ? ` · ${new URL(atlassianSite).hostname}` : ''}`
+                ? `Searching ${atlassianSources.includes('jira') && atlassianSources.includes('confluence') ? 'Jira and Confluence' : atlassianSources.includes('jira') ? 'Jira' : 'Confluence'}${atlassianSite ? ` · ${new URL(atlassianSite).hostname}` : ''}`
                 : atlassianAuthorizing ? 'Finish in the sign-in tab'
                   : atlassianConnection === 'checking' ? 'Checking connection…'
                     : atlassianConnection === 'error' ? 'We couldn’t check your connection'
@@ -850,6 +844,22 @@ export default function App() {
           </div>
           {atlassianConnection === 'connected' && <span className="drive-connected-badge">Connected</span>}
         </div>
+        {atlassianConnection === 'connected' && <>
+          {sites.length > 1 && <label className="task-field">Atlassian site
+            <select value={sites.find(site => site.url === atlassianSite)?.id ?? ''} disabled={atlassianBusy} onChange={event => {
+              setAtlassianBusy(true);
+              void fetch(`${ATLASSIAN_STATUS_URL.replace(/\/status$/, '')}/site`, { method: 'POST', body: JSON.stringify({ cloud_id: event.target.value }) })
+                .then(async response => { if (!response.ok) throw new Error(problem('MI-ATL-001')); await syncAtlassianStatus(); })
+                .catch(cause => setAtlassianError(userError(cause, 'MI-ATL-001'))).finally(() => setAtlassianBusy(false));
+            }}>{sites.map(site => <option key={site.id} value={site.id}>{site.name}</option>)}</select>
+          </label>}
+          <button className="drive-connect-button" disabled={atlassianBusy} onClick={() => {
+            setAtlassianBusy(true);
+            void fetch(`${ATLASSIAN_STATUS_URL.replace(/\/status$/, '')}/disconnect`, { method: 'POST', body: '{}' })
+              .then(async response => { if (!response.ok) throw new Error(problem('MI-ATL-001')); await syncAtlassianStatus(); })
+              .catch(cause => setAtlassianError(userError(cause, 'MI-ATL-001'))).finally(() => setAtlassianBusy(false));
+          }}>Disconnect Jira & Confluence</button>
+        </>}
         {atlassianError && <p className="drive-error" role="status">{userError(atlassianError, 'MI-ATL-001')}</p>}
         {atlassianConnection !== 'connected' && (
           <button className="drive-connect-button" onClick={() => atlassianConnection === 'error' ? void syncAtlassianStatus() : void connectAtlassian()}
@@ -887,4 +897,8 @@ export default function App() {
       </footer>
     </main>
   );
+}
+
+export default function App() {
+  return <AuthGate>{session => <MeetingApp key={session.userId} userId={session.userId!} />}</AuthGate>;
 }

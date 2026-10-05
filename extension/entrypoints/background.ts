@@ -1,3 +1,5 @@
+import { createBackgroundAuth, backendFetch } from '../lib/background-auth';
+import { BACKEND_HTTP_BASE_URL } from '../lib/config';
 import { problem, userError, httpProblem } from '../lib/user-messages';
 import type { ExtensionMessage, ExtensionState } from '../lib/types';
 import { didMeetingEnd, isTimelineForMeeting, meetingIdFromUrl } from '../lib/meeting-session';
@@ -24,6 +26,23 @@ let offscreenCreation: Promise<void> | undefined;
 let captureOperation: Promise<void> = Promise.resolve();
 let initialization: Promise<void> | undefined;
 let broadcastOperation: Promise<void> = Promise.resolve();
+let authEpoch = 0;
+let auth: ReturnType<typeof createBackgroundAuth>;
+function initializeAuth() { return createBackgroundAuth(async () => {
+  authEpoch++;
+  await initializeState();
+  await enqueue(stopCapture);
+  state = { ...state, timeline: undefined, timelineOwner: undefined, captureSessionId: undefined, error: undefined };
+  await broadcast();
+  await chrome.runtime.sendMessage({ type: 'AUTH_CHANGED' }).catch(() => undefined);
+}); }
+
+function trusted(sender: chrome.runtime.MessageSender) {
+  if (sender.id !== chrome.runtime.id || !sender.url) return false;
+  const url = new URL(sender.url);
+  return url.protocol === 'chrome-extension:' && url.hostname === chrome.runtime.id;
+}
+
 
 function initializeState() {
   if (!initialization) {
@@ -149,6 +168,7 @@ async function prepareCapture(tabId: number) {
 }
 
 function startCapture(tabId: number) {
+  const epoch = authEpoch;
   if (state.captureStatus === 'capturing' || state.captureStatus === 'connecting') {
     return Promise.resolve({ ok: false, error: problem('MI-CAP-002') });
   }
@@ -164,6 +184,8 @@ function startCapture(tabId: number) {
     });
   });
   return Promise.all([restoredState, streamIdRequest]).then(async ([, streamId]) => {
+    await auth.access();
+    if (epoch !== authEpoch) throw new Error(problem('MI-AUTH-105'));
     if (state.captureStatus === 'capturing' || state.captureStatus === 'connecting') {
       return { ok: false, error: problem('MI-CAP-002'), state };
     }
@@ -174,6 +196,7 @@ function startCapture(tabId: number) {
     const captureSessionId = crypto.randomUUID();
     state = { ...state, meetingStatus: 'in-meeting', meetingTabId: tabId, captureTabId: tabId, captureSessionId, captureStatus: 'connecting', backendConnected: false, timeline: undefined, audioWarning: undefined, timelineOwner: { tabId, meetingId }, error: undefined };
     void broadcast();
+    if (epoch !== authEpoch) throw new Error(problem('MI-AUTH-105'));
     const result = await chrome.runtime.sendMessage({ type: 'START_OFFSCREEN', streamId, captureSessionId }) as { ok?: boolean; error?: string } | undefined;
     if (!result?.ok) {
       if (state.captureStatus === 'idle') return { ok: false, error: problem('MI-CAP-006'), state };
@@ -200,6 +223,20 @@ function startCapture(tabId: number) {
 }
 
 async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  if (message.type.startsWith('AUTH_') || message.type === 'MEETING_TICKET') {
+    if (!trusted(sender)) return { ok: false, error: problem('MI-AUTH-106') };
+    if (message.type === 'AUTH_STATE') return { ok: true, session: await auth.publicState() };
+    if (message.type === 'AUTH_REQUEST') return { ok: true, ...await auth.requestCode(message.email) };
+    if (message.type === 'AUTH_VERIFY') { const session = await auth.verifyCode(message.code); await chrome.runtime.sendMessage({ type: 'AUTH_CHANGED' }).catch(() => undefined); return { ok: true, session }; }
+    if (message.type === 'AUTH_LOGOUT') { await auth.logout(); return { ok: true }; }
+    if (message.type === 'AUTH_FETCH') return { ok: true, ...await backendFetch(auth, message.url, message.method, message.body) };
+    if (message.type === 'MEETING_TICKET') {
+      const result = await backendFetch(auth, `${BACKEND_HTTP_BASE_URL}/api/meeting/connection-ticket`, 'POST', '{}');
+      if (result.status !== 200) throw new Error(problem('MI-AUTH-104'));
+      return { ok: true, ticket: result.data.ticket };
+    }
+    return { ok: false };
+  }
   if (message.type === 'START_CAPTURE') return startCapture(sender.tab?.id ?? message.tabId);
   if (message.type === 'MIC_PERMISSION_RESULT') {
     if (message.granted || isMicrophonePermissionError(message.errorName)) {
@@ -266,6 +303,7 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
     await enqueue(stopCapture);
     return { ok: true, state };
   } else if (message.type === 'CAPTURE_STATE') {
+    if (!trusted(sender) || !sender.url?.endsWith('/offscreen-page.html')) return { ok: false };
     if (!state.captureSessionId || message.captureSessionId !== state.captureSessionId) return { ok: true };
     const incoming = message.state.timeline;
     const current = state.timeline;
@@ -331,12 +369,18 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
   void handleTabUpdated(tabId, change).catch(() => undefined);
 });
 
+async function backgroundAuthenticatedFetch(url: string, _options?: unknown) {
+  const result = await backendFetch(auth, url);
+  return new Response(JSON.stringify(result.data), { status: result.status });
+}
+
 async function handleGoogleDriveOAuthNavigation(tabId: number, url: string) {
   if (processingDriveOAuthTabs.has(tabId)) return;
   processingDriveOAuthTabs.add(tabId);
   try {
     const stored = await chrome.storage.local.get(GOOGLE_DRIVE_AUTH_TAB_KEY);
-    const pending = stored[GOOGLE_DRIVE_AUTH_TAB_KEY] as { tabId?: number; redirectUri?: string } | undefined;
+    const pending = stored[GOOGLE_DRIVE_AUTH_TAB_KEY] as { tabId?: number; redirectUri?: string; userId?: string } | undefined;
+    if (pending && pending.userId !== (await auth.publicState()).userId) return;
     if (pending?.tabId !== tabId || !pending.redirectUri || !isGoogleDriveCallbackUrl(url, pending.redirectUri)) return;
 
     const callback = new URL(url);
@@ -353,20 +397,21 @@ async function handleGoogleDriveOAuthNavigation(tabId: number, url: string) {
       return;
     }
 
-    const response = await fetch(GOOGLE_DRIVE_STATUS_URL, { cache: 'no-store' });
+    const response = await backgroundAuthenticatedFetch(GOOGLE_DRIVE_STATUS_URL, { cache: 'no-store' });
     if (!response.ok) throw new Error(httpProblem(response.status, 'MI-DRV-001'));
     const status = await response.json() as { connected?: boolean };
     if (!status.connected) throw new Error(problem('MI-DRV-002'));
 
+    if (pending.userId !== (await auth.publicState()).userId) return;
     await chrome.storage.local.set({
-      [GOOGLE_DRIVE_AUTH_RESULT_KEY]: { connected: true, completedAt: Date.now() },
+      [GOOGLE_DRIVE_AUTH_RESULT_KEY]: { connected: true, userId: pending.userId, completedAt: Date.now() },
     });
     await chrome.storage.local.remove(GOOGLE_DRIVE_AUTH_TAB_KEY);
     await chrome.tabs.remove(tabId).catch(() => undefined);
   } catch (error) {
     try {
       const latest = await chrome.storage.local.get(GOOGLE_DRIVE_AUTH_TAB_KEY);
-      const pending = latest[GOOGLE_DRIVE_AUTH_TAB_KEY] as { tabId?: number } | undefined;
+      const pending = latest[GOOGLE_DRIVE_AUTH_TAB_KEY] as { tabId?: number; userId?: string } | undefined;
       // Only clean up this attempt. A newer sign-in may have replaced it while
       // the callback status request was in flight.
       if (pending?.tabId === tabId) {
@@ -390,7 +435,8 @@ async function handleGoogleDriveOAuthNavigation(tabId: number, url: string) {
 async function handleGoogleDriveOAuthTabClosed(tabId: number) {
   try {
     const stored = await chrome.storage.local.get(GOOGLE_DRIVE_AUTH_TAB_KEY);
-    const pending = stored[GOOGLE_DRIVE_AUTH_TAB_KEY] as { tabId?: number } | undefined;
+    const pending = stored[GOOGLE_DRIVE_AUTH_TAB_KEY] as { tabId?: number; userId?: string } | undefined;
+    if (pending && pending.userId !== (await auth.publicState()).userId) return;
     if (pending?.tabId !== tabId) return;
     await chrome.storage.local.remove(GOOGLE_DRIVE_AUTH_TAB_KEY);
     await chrome.storage.local.set({
@@ -412,6 +458,7 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
 });
 
 export default defineBackground(() => {
+  auth = initializeAuth();
   // The toolbar invocation grants capture access to the active tab. Keep the
   // action handler responsible for opening the panel as well.
   chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => undefined);

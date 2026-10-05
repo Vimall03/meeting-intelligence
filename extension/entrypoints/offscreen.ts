@@ -18,6 +18,28 @@ let stopping = false;
 let captureGeneration = 0;
 let captureSessionId: string | undefined;
 let startPending = false;
+let authTimer: ReturnType<typeof setTimeout> | undefined;
+let socketAuthorized = false;
+let authorizedUntil = 0;
+
+async function renewSocket(activeSocket: WebSocket, generation: number) {
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'MEETING_TICKET' }) as { ok?: boolean; ticket?: string; error?: string };
+    assertCurrent(generation);
+    if (socket !== activeSocket || activeSocket.readyState !== WebSocket.OPEN) return;
+    if (!result?.ok || !result.ticket) throw new Error(result?.error ?? problem('MI-AUTH-104'));
+    activeSocket.send(JSON.stringify({ type: 'authenticate', ticket: result.ticket }));
+    authTimer = setTimeout(() => { void renewSocket(activeSocket, generation); }, 10_000);
+  } catch (error) {
+    if (generation !== captureGeneration || stopping) return;
+    if (Date.now() >= authorizedUntil || (error instanceof Error && error.message === problem('MI-AUTH-105'))) {
+      notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-AUTH-105') });
+      await stop();
+    } else {
+      authTimer = setTimeout(() => { void renewSocket(activeSocket, generation); }, 10_000);
+    }
+  }
+}
 
 function assertCurrent(generation: number) {
   if (generation !== captureGeneration || stopping) {
@@ -106,28 +128,39 @@ async function start(streamId: string, sessionId: string) {
   }
 
   notify({ captureStatus: 'connecting', backendConnected: false, timeline: undefined, error: undefined });
+  const initialAuthorization = await chrome.runtime.sendMessage({ type: 'MEETING_TICKET' }) as { ok?: boolean; ticket?: string; error?: string };
+  assertCurrent(generation);
+  if (!initialAuthorization?.ok || !initialAuthorization.ticket) throw new Error(initialAuthorization?.error ?? problem('MI-AUTH-104'));
   const sessionSocket = new WebSocket(MEETING_SOCKET_URL);
   socket = sessionSocket;
   sessionSocket.onopen = () => {
     if (socket !== sessionSocket || stopping) return;
-    notify({ captureStatus: 'capturing', backendConnected: true, error: undefined });
+    authorizedUntil = Date.now() + 10_000;
+    sessionSocket.send(JSON.stringify({ type: 'authenticate', ticket: initialAuthorization.ticket }));
+    authTimer = setTimeout(() => { void renewSocket(sessionSocket, generation); }, 10_000);
   };
   sessionSocket.onerror = () => {
     if (socket !== sessionSocket || stopping) return;
     notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-CON-001') });
     void stop();
   };
-  sessionSocket.onclose = () => {
+  sessionSocket.onclose = (event) => {
     if (socket !== sessionSocket || stopping) return;
-    notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-CON-002') });
+    notify({ captureStatus: 'error', backendConnected: false, error: problem(event.code === 4401 ? 'MI-AUTH-105' : 'MI-CON-002') });
     // Release the selected tab and mic when the backend disconnects.
     void stop();
   };
   sessionSocket.onmessage = (event) => {
     if (socket !== sessionSocket || stopping || typeof event.data !== 'string') return;
     try {
-      const message: unknown = JSON.parse(event.data);
-      if (isTimelineSnapshot(message)) notify({ timeline: message });
+      const message = JSON.parse(event.data);
+      if (message.type === 'auth_ready' && typeof message.expiresAt === 'number') {
+        socketAuthorized = true;
+        authorizedUntil = typeof message.expiresIn === 'number' ? Date.now() + message.expiresIn * 1000 : message.expiresAt * 1000;
+        if (authTimer) clearTimeout(authTimer);
+        authTimer = setTimeout(() => { void renewSocket(sessionSocket, generation); }, Math.max(1000, authorizedUntil - Date.now() - 120_000));
+        notify({ captureStatus: 'capturing', backendConnected: true, error: undefined });
+      } else if (socketAuthorized && isTimelineSnapshot(message)) notify({ timeline: message });
     } catch {
       // Ignore malformed or unrelated backend messages.
     }
@@ -272,7 +305,7 @@ async function start(streamId: string, sessionId: string) {
   const activeRecorder = new MediaRecorder(recordingStream, { mimeType: AUDIO_MIME_TYPE });
   recorder = activeRecorder;
   activeRecorder.ondataavailable = (event) => {
-    if (recorder === activeRecorder && event.data.size > 0 && sessionSocket.readyState === WebSocket.OPEN) sessionSocket.send(event.data);
+    if (recorder === activeRecorder && event.data.size > 0 && sessionSocket.readyState === WebSocket.OPEN && socketAuthorized) sessionSocket.send(event.data);
   };
   activeRecorder.onstop = () => {
     if (recordingWindowTimer) clearTimeout(recordingWindowTimer);
@@ -290,6 +323,10 @@ async function start(streamId: string, sessionId: string) {
 async function stop() {
   captureGeneration += 1;
   stopping = true;
+  socketAuthorized = false;
+  authorizedUntil = 0;
+  if (authTimer) clearTimeout(authTimer);
+  authTimer = undefined;
   if (recordingWindowTimer) clearTimeout(recordingWindowTimer);
   recordingWindowTimer = undefined;
   if (audioHealthTimer) clearInterval(audioHealthTimer);
@@ -344,6 +381,7 @@ function notify(state: Record<string, unknown>) {
 }
 
 chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string; captureSessionId?: string }, _sender, sendResponse) => {
+  if (_sender.tab) return false;
   if (message.type === 'GET_OFFSCREEN_STATUS') {
     sendResponse({ active: !stopping && tabStream?.active === true });
     return false;
