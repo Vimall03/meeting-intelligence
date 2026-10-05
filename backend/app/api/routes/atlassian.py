@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.core.user_messages import product_error
+from app.services.integrations import atlassian_service, atlassian_callback
 
 from app.services.atlassian_service import (
     AtlassianAPIError, AtlassianAuthorizationRequiredError, AtlassianError,
@@ -19,11 +20,8 @@ from app.services.google_drive_service import GoogleDriveSearchTerms
 router = APIRouter(prefix="/api/integrations/atlassian", tags=["atlassian"])
 
 
-def get_service(request: Request) -> AtlassianService:
-    return request.app.state.atlassian
-
-
-Service = Annotated[AtlassianService, Depends(get_service)]
+Service = Annotated[Any, Depends(atlassian_service)]
+CallbackService = Annotated[Any, Depends(atlassian_callback)]
 
 
 @router.get("/status")
@@ -35,13 +33,13 @@ async def status(service: Service) -> dict[str, Any]:
 async def start_auth(service: Service, force: bool = False) -> dict[str, Any]:
     try:
         current = await service.status()
-        return {**current, "authorization_url": None} if current["connected"] and not force else service.authorization_url()
+        return {**current, "authorization_url": None} if current["connected"] and not force else await service.authorization_url()
     except AtlassianError as exc:
         raise _http_error(exc) from exc
 
 
 @router.get("/oauth/callback", response_class=HTMLResponse)
-async def callback(service: Service, code: str | None = None, state: str | None = None, error: str | None = None, error_description: str | None = None) -> HTMLResponse:
+async def callback(service: CallbackService, code: str | None = None, state: str | None = None, error: str | None = None, error_description: str | None = None) -> HTMLResponse:
     if error:
         return _result_page("Sign-in wasn’t completed", product_error("MI-ATL-003"), 400)
     try:
@@ -67,8 +65,26 @@ async def search(service: Service, query: str = Query(min_length=1, max_length=1
 
 class CreateJiraTask(BaseModel):
     project_id: str = Field(min_length=1)
+    site_url: str = Field(min_length=1, max_length=253)
     title: str = Field(min_length=1, max_length=255)
     description: str = Field(min_length=1, max_length=5000)
+
+
+@router.get('/sites')
+async def sites(service: Service):
+    return {'sites': await service.list_sites()}
+
+
+class SelectSite(BaseModel):
+    cloud_id: str = Field(min_length=1, max_length=128)
+
+
+@router.post('/site')
+async def select_site(service: Service, choice: SelectSite):
+    try:
+        return await service.select_site(choice.cloud_id)
+    except AtlassianError as exc:
+        raise _http_error(exc) from exc
 
 
 @router.get("/jira/projects")
@@ -83,7 +99,7 @@ async def jira_projects(service: Service) -> dict[str, Any]:
 async def create_jira_task(service: Service, request: CreateJiraTask) -> dict[str, str]:
     try:
         return await service.create_jira_task(
-            project_id=request.project_id, title=request.title, description=request.description,
+            project_id=request.project_id, title=request.title, description=request.description, expected_site_url=request.site_url,
         )
     except AtlassianError as exc:
         raise _http_error(exc) from exc

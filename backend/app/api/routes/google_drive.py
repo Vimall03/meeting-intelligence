@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
 from app.core.user_messages import product_error
+from app.services.integrations import google_service, google_callback
 
 from app.services.google_drive_service import (
     GoogleDriveAPIError,
@@ -24,11 +25,8 @@ router = APIRouter(
 )
 
 
-def get_google_drive_service(request: Request) -> GoogleDriveService:
-    return request.app.state.google_drive
-
-
-Service = Annotated[GoogleDriveService, Depends(get_google_drive_service)]
+Service = Annotated[Any, Depends(google_service)]
+CallbackService = Annotated[Any, Depends(google_callback)]
 
 
 @router.get("/status")
@@ -42,14 +40,14 @@ async def start_auth(service: Service) -> dict[str, Any]:
         current_status = await service.status()
         if current_status["connected"]:
             return {**current_status, "authorization_url": None}
-        return service.authorization_url()
+        return await service.authorization_url()
     except GoogleDriveError as exc:
         raise _http_error(exc) from exc
 
 
 @router.get("/oauth/callback", response_class=HTMLResponse)
 async def oauth_callback(
-    service: Service,
+    service: CallbackService,
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,

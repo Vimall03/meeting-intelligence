@@ -5,6 +5,11 @@ return provider exception text to a person. New error pages must use this catalo
 """
 
 MESSAGES = {
+    "MI-AUTH-108": "Check your details and try again.",
+    "MI-AUTH-105": "Your sign-in has expired. Sign in again to continue.",
+    "MI-AUTH-104": "We couldn’t confirm your sign-in. Try again in a moment.",
+    "MI-AUTH-106": "You don’t have access to this action.",
+    "MI-AUTH-102": "There have been too many requests. Wait a moment, then try again.",
     "MI-AUTH-001": "Your connection needs to be renewed. Sign in again from Settings.",
     "MI-DRV-001": "We couldn’t access Google Drive. Try again from Settings.",
     "MI-DRV-002": "We couldn’t connect Google Drive. Try signing in again from Settings.",

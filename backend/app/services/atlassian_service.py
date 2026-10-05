@@ -73,10 +73,11 @@ def _state_decode(value: str) -> dict[str, Any]:
 
 
 class AtlassianService:
-    def __init__(self, settings: AtlassianSettings, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(self, settings: AtlassianSettings, *, transport: httpx.AsyncBaseTransport | None = None, token_store=None) -> None:
         self.settings = settings
-        self.token_store = GoogleDriveTokenStore(settings.token_path)
+        self.token_store = token_store if token_store is not None else GoogleDriveTokenStore(settings.token_path)
         self._refresh_lock = asyncio.Lock()
+        self._distributed_refresh_lock = token_store.refresh_lock if token_store is not None else None
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(settings.timeout_seconds, connect=3.0),
             transport=transport,
@@ -138,11 +139,12 @@ class AtlassianService:
             "can_create_tasks": "write:jira-work" in granted,
         }
 
-    async def complete_authorization(self, code: str, state: str) -> dict[str, Any]:
+    async def complete_authorization(self, code: str, state: str, *, state_verified=False) -> dict[str, Any]:
         self._require_config()
         if not code or not state:
             raise AtlassianOAuthError("Atlassian did not return an authorization code and state")
-        self._verify_state(state)
+        if not state_verified:
+            self._verify_state(state)
         try:
             response = await self._client.post(TOKEN_URL, json={
                 "grant_type": "authorization_code", "client_id": self.settings.client_id,
@@ -165,7 +167,7 @@ class AtlassianService:
             "access_token": access_token, "refresh_token": refresh_token,
             "expires_at": time.time() + int(payload.get("expires_in", 3600)),
             "cloud_id": selected["id"], "site_url": selected["url"],
-            "scopes": selected["scopes"],
+            "scopes": selected["scopes"], "resources": resources,
         })
         return await self.status()
 
@@ -179,19 +181,42 @@ class AtlassianService:
                 continue
             entry = sites.setdefault(cloud_id, {"id": cloud_id, "url": site, "scopes": set()})
             entry["scopes"].update(resource.get("scopes") or [])
-        required = {"read:jira-work"}
-        candidates = [site for site in sites.values() if required.issubset(site["scopes"])]
+        candidates = [site for site in sites.values() if {'read:jira-work', 'search:confluence'} & site['scopes']]
         if self.settings.site_url:
             desired = _site_url(self.settings.site_url)
             candidates = [site for site in candidates if site["url"] == desired]
-        if len(candidates) != 1:
-            if not candidates:
-                raise AtlassianOAuthError("No matching Atlassian Cloud site grants Jira access. Check the app scopes and ATLASSIAN_SITE_URL.")
-            raise AtlassianOAuthError("Several Atlassian sites are accessible. Set ATLASSIAN_SITE_URL to the site you want to search.")
+        if not candidates:
+            raise AtlassianOAuthError("No authorized Atlassian Cloud site is available.")
+        candidates.sort(key=lambda site: site['url'])
         return {"id": candidates[0]["id"], "url": candidates[0]["url"], "scopes": sorted(candidates[0]["scopes"])}
 
     async def disconnect(self) -> None:
         await self.token_store.clear()
+
+    async def list_sites(self):
+        token = await self.token_store.read()
+        if not token:
+            raise AtlassianAuthorizationRequiredError()
+        sites = {}
+        for resource in token.get('resources', []):
+            try:
+                url = _site_url(str(resource.get('url', '')))
+            except AtlassianOAuthError:
+                continue
+            if {'read:jira-work', 'search:confluence'} & set(resource.get('scopes', [])):
+                entry = sites.setdefault(resource['id'], {'id': resource['id'], 'url': url, 'name': resource.get('name', url), 'scopes': set()})
+                entry['scopes'].update(resource.get('scopes', []))
+        return [{'id': s['id'], 'name': s['name'], 'url': s['url'], 'scopes': sorted(s['scopes'])} for s in sites.values()]
+
+    async def select_site(self, cloud_id):
+        lock = self._distributed_refresh_lock() if self._distributed_refresh_lock else self._refresh_lock
+        async with lock:
+            token = await self.token_store.read()
+            site = next((s for s in await self.list_sites() if s['id'] == cloud_id), None)
+            if not site:
+                raise AtlassianAuthorizationRequiredError()
+            await self.token_store.write({**token, 'cloud_id': site['id'], 'site_url': site['url'], 'scopes': site['scopes']})
+        return await self.status()
 
     async def _access_token(self, *, force_refresh: bool = False) -> tuple[str, dict[str, Any]]:
         token = await self.token_store.read()
@@ -201,7 +226,7 @@ class AtlassianService:
             raise AtlassianAuthorizationRequiredError("The saved Atlassian connection is for a different Cloud site. Reconnect this site.")
         if not force_refresh and token.get("access_token") and float(token.get("expires_at", 0)) > time.time() + 60:
             return str(token["access_token"]), token
-        async with self._refresh_lock:
+        async with self._distributed_refresh_lock() if self._distributed_refresh_lock else self._refresh_lock:
             token = await self.token_store.read() or token
             if not force_refresh and token.get("access_token") and float(token.get("expires_at", 0)) > time.time() + 60:
                 return str(token["access_token"]), token
@@ -213,7 +238,7 @@ class AtlassianService:
                 })
             except httpx.HTTPError as exc:
                 raise AtlassianOAuthError("Could not refresh Atlassian access") from exc
-            if response.status_code in (400, 401):
+            if response.status_code in (400, 401) and response.json().get('error') == 'invalid_grant':
                 await self.token_store.clear()
                 raise AtlassianAuthorizationRequiredError("Atlassian access expired or was revoked. Connect again.")
             if response.is_error:
@@ -241,9 +266,9 @@ class AtlassianService:
         except (httpx.HTTPError, ValueError) as exc:
             raise AtlassianAPIError(f"Could not complete the Atlassian {operation}. If you submitted a task, check Jira before retrying.") from exc
 
-    async def list_jira_projects(self) -> list[dict[str, str]]:
+    async def list_jira_projects(self, *, cloud_id=None) -> list[dict[str, str]]:
         _, token = await self._access_token()
-        cloud_id = token["cloud_id"]
+        cloud_id = cloud_id or token["cloud_id"]
         projects: list[dict[str, str]] = []
         start_at = 0
         while True:
@@ -264,7 +289,7 @@ class AtlassianService:
                 raise AtlassianAPIError("Too many Jira projects to show. Narrow the site or contact support.")
         return sorted(projects, key=lambda project: project["name"].casefold())
 
-    async def create_jira_task(self, *, project_id: str, title: str, description: str) -> dict[str, str]:
+    async def create_jira_task(self, *, project_id: str, title: str, description: str, expected_site_url=None) -> dict[str, str]:
         title = " ".join(title.split())
         description = description.strip()
         if not title or len(title) > 255 or not description or len(description) > 5000:
@@ -272,7 +297,9 @@ class AtlassianService:
         _, token = await self._access_token()
         if "write:jira-work" not in set(token.get("scopes") or []):
             raise AtlassianAuthorizationRequiredError("Reconnect Atlassian and approve Jira task creation")
-        projects = await self.list_jira_projects()
+        if expected_site_url is not None and token['site_url'] != _site_url(expected_site_url):
+            raise AtlassianAPIError('Site changed. Reopen the task form.')
+        projects = await self.list_jira_projects(cloud_id=token['cloud_id'])
         project = next((item for item in projects if item["id"] == project_id), None)
         if project is None:
             raise AtlassianAPIError("Select a Jira project from the list")

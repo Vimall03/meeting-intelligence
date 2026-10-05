@@ -3,6 +3,10 @@ import importlib
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+from contextlib import asynccontextmanager
+from app.core.auth import Principal, issue_ticket
+from test_auth_integration import MemoryStore
+import time, json
 
 from fastapi import WebSocketDisconnect
 
@@ -15,12 +19,20 @@ route = importlib.import_module("app.api.routes.meeting_stream")
 
 class FakeWebSocket:
     def __init__(self, *, drive=None, finish_on_empty_search: bool = False) -> None:
-        self.app = SimpleNamespace(state=SimpleNamespace(google_drive=drive or FakeDrive()))
+        self.app = SimpleNamespace(state=SimpleNamespace(google_drive=drive or FakeDrive(), users=MemoryStore()))
         self.sent: list[dict] = []
         self.finished = asyncio.Event()
         self.received_audio = False
         self.finish_on_empty_search = finish_on_empty_search
 
+    async def receive_text(self):
+        user = getattr(self, 'user', 'A')
+        return json.dumps({'ticket': await issue_ticket(Principal(user, 'family-' + user, int(time.time()) + 900), self.app.state.users)})
+    async def receive(self):
+        return {'type': 'websocket.receive', 'bytes': await self.receive_bytes()}
+    async def close(self, **_kwargs):
+        self.closed = _kwargs
+        self.finished.set()
     async def accept(self) -> None:
         pass
 
@@ -38,6 +50,14 @@ class FakeWebSocket:
         if self.finish_on_empty_search and message.get("type") == "RELATED_FILES" and not message.get("files"):
             self.finished.set()
 
+
+@asynccontextmanager
+async def scoped_provider(db, principal, provider):
+    if provider == 'google_drive': yield db.test_drive
+    else:
+        class EmptyAtlassian:
+            async def status(self): return {'connected': False}
+        yield getattr(db, 'test_atlassian', None) or EmptyAtlassian()
 
 class FakeDrive:
     async def search_relevant_files(self, _terms, *, top_k: int) -> dict:
@@ -106,6 +126,9 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
             }
 
         with (
+            patch.object(route, 'provider_session', scoped_provider),
+            patch.object(websocket.app.state.users, 'test_drive', websocket.app.state.google_drive, create=True),
+            patch.object(websocket.app.state.users, 'test_atlassian', getattr(websocket.app.state, 'atlassian', None), create=True),
             patch.object(route.settings, "openrouter_api_key", "test-key"),
             patch.object(route, "JevService", FakeJev),
             patch.object(route, "LlmService", FakeLlm),
@@ -134,6 +157,9 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
             }
 
         with (
+            patch.object(route, 'provider_session', scoped_provider),
+            patch.object(websocket.app.state.users, 'test_drive', websocket.app.state.google_drive, create=True),
+            patch.object(websocket.app.state.users, 'test_atlassian', getattr(websocket.app.state, 'atlassian', None), create=True),
             patch.object(route.settings, "openrouter_api_key", "test-key"),
             patch.object(route, "JevService", FakeJev),
             patch.object(route, "LlmService", FakeLlm),
@@ -184,7 +210,10 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
                     return {"audio_duration": 3, "segments": [{"start": 0, "end": 3, "text": "Please send the launch plan to Maya." if audio == b"first" else "Now the next topic is checkout."}]}
 
                 with (
-                    patch.object(route.settings, "openrouter_api_key", "test-key"),
+                    patch.object(route, 'provider_session', scoped_provider),
+                    patch.object(websocket.app.state.users, 'test_drive', websocket.app.state.google_drive, create=True),
+            patch.object(websocket.app.state.users, 'test_atlassian', getattr(websocket.app.state, 'atlassian', None), create=True),
+            patch.object(route.settings, "openrouter_api_key", "test-key"),
                     patch.object(route, "JevService", FakeJev),
                     patch.object(route, "LlmService", FakeLlm),
                     patch.object(route, "transcribe_snapshot", transcribe),
@@ -195,5 +224,59 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("next topic", updates[-1]["transcript"])
 
 
-if __name__ == "__main__":
+    async def test_concurrent_meetings_never_exchange_results_or_timeline_sessions(self):
+        from app.services.integrations import provider_session as real_provider
+        from app.services.google_drive_service import GoogleDriveService
+        from app.services.user_store import CredentialStore
+        import httpx
+        db = MemoryStore()
+        sockets = [FakeWebSocket(), FakeWebSocket()]
+        for user, socket in zip(('A', 'B'), sockets):
+            socket.user = user; socket.app.state.users = db
+            store = CredentialStore(db, user, 'google_drive')
+            await store.write({'access_token': user + '-secret', 'refresh_token': user + '-refresh', 'expires_at': time.time() + 900})
+        def drive_api(request):
+            user = request.headers['Authorization'].split()[-1].split('-')[0]
+            return httpx.Response(200, json={'files': [{'id': user + '-private', 'name': user + ' launch plan', 'mimeType': 'text/plain'}]})
+        original = GoogleDriveService.__init__
+        def init(service, config, **kwargs): original(service, config, transport=httpx.MockTransport(drive_api), **kwargs)
+        async def transcribe(audio):
+            return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': 'Please send the launch plan to Maya.'}]}
+        with patch.object(route, 'provider_session', real_provider), patch.object(GoogleDriveService, '__init__', init), patch.object(route.settings, 'openrouter_api_key', 'test-key'), patch.object(route, 'JevService', FakeJev), patch.object(route, 'LlmService', FakeLlm), patch.object(route, 'transcribe_snapshot', transcribe):
+            await asyncio.wait_for(asyncio.gather(*(route.meeting_stream(s) for s in sockets)), timeout=5)
+        latest = [[m for m in s.sent if m['type'] == 'timeline_snapshot'][-1] for s in sockets]
+        self.assertNotEqual(latest[0]['session_id'], latest[1]['session_id'])
+        for owner, other, snapshot in [('A', 'B', latest[0]), ('B', 'A', latest[1])]:
+            result = json.dumps(snapshot)
+            self.assertIn(owner + '-private', result); self.assertNotIn(other + '-private', result)
+            self.assertNotIn('-secret', result); self.assertNotIn('-refresh', result)
+
+    async def test_socket_rejects_renewal_for_another_user(self):
+        db = MemoryStore()
+        class SwitchedSocket(FakeWebSocket):
+            async def receive(self):
+                ticket = await issue_ticket(Principal('B', 'family-B', int(time.time()) + 900), db)
+                return {'type': 'websocket.receive', 'text': json.dumps({'ticket': ticket})}
+        socket = SwitchedSocket(); socket.app.state.users = db
+        db.test_drive = FakeDrive()
+        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''):
+            await asyncio.wait_for(route.meeting_stream(socket), timeout=2)
+        self.assertEqual(socket.closed['code'], 4401)
+        self.assertFalse(socket.received_audio)
+        self.assertFalse(any(m.get('items') for m in socket.sent))
+
+    async def test_logout_stops_an_existing_socket_before_processing_next_audio(self):
+        db = MemoryStore()
+        class RevokedSocket(FakeWebSocket):
+            async def send_json(self, message):
+                self.sent.append(message)
+                if message['type'] == 'timeline_snapshot':
+                    await db.put('REVOKED#family-A', {'expiresAt': int(time.time()) + 86400})
+        socket = RevokedSocket(); socket.app.state.users = db; db.test_drive = FakeDrive()
+        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''):
+            await asyncio.wait_for(route.meeting_stream(socket), timeout=2)
+        self.assertEqual(socket.closed['code'], 4401)
+        self.assertFalse(any(m.get('type') == 'transcription_state' for m in socket.sent))
+
+if __name__ == '__main__':
     unittest.main()

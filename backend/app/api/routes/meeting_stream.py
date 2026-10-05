@@ -6,7 +6,10 @@ import time
 from collections import deque
 from pathlib import Path
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
+from contextlib import AsyncExitStack
+from app.core.auth import consume_ticket, ensure_active, failure
+from app.services.integrations import provider_session
 from fastapi.concurrency import run_in_threadpool
 
 from app.core.config import settings
@@ -78,8 +81,28 @@ async def search_atlassian(atlassian, search_terms) -> dict:
 @router.websocket("/ws/meeting")
 async def meeting_stream(websocket: WebSocket):
     await websocket.accept()
-    google_drive: GoogleDriveService = websocket.app.state.google_drive
-    atlassian = getattr(websocket.app.state, "atlassian", None)
+    db = websocket.app.state.users
+    providers = AsyncExitStack()
+    try:
+        hello = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+        if len(hello) > 512:
+            raise failure()
+        import json
+        payload = json.loads(hello)
+        principal = await consume_ticket(payload.get('ticket'), db)
+        google_drive = await providers.enter_async_context(provider_session(db, principal, 'google_drive'))
+        atlassian = await providers.enter_async_context(provider_session(db, principal, 'atlassian'))
+        await websocket.send_json({'type': 'auth_ready', 'expiresAt': principal.expires, 'expiresIn': max(0, principal.expires - int(time.time()))})
+    except Exception:
+        await providers.aclose()
+        await websocket.close(code=4401, reason='MI-AUTH-105')
+        return
+
+    async def safe_send(message):
+        await ensure_active(principal, db)
+        await websocket.send_json(message)
+
+    last_auth_check = 0.0
     pending_audio_windows: deque[bytes] = deque()
     transcribed_audio_end = 0.0
     transcript_text = ""
@@ -134,7 +157,7 @@ async def meeting_stream(websocket: WebSocket):
                 event.score,
                 event.is_refinement,
             )
-            await websocket.send_json(
+            await safe_send(
                 {
                     "type": "jev_decision",
                     "decision": event.type,
@@ -157,15 +180,33 @@ async def meeting_stream(websocket: WebSocket):
                 )
 
     try:
-        await websocket.send_json(timeline.snapshot())
+        await safe_send(timeline.snapshot())
         while True:
             try:
-                data = await asyncio.wait_for(websocket.receive_bytes(), timeout=0.25)
-                pending_audio_windows.append(data)
+                message = await asyncio.wait_for(websocket.receive(), timeout=0.25)
+                if message['type'] == 'websocket.disconnect':
+                    raise WebSocketDisconnect()
+                if message.get('text') is not None:
+                    if len(message['text']) > 512:
+                        raise failure()
+                    renewal = json.loads(message['text'])
+                    renewed = await consume_ticket(renewal.get('ticket'), db)
+                    if renewed.sub != principal.sub or renewed.family != principal.family:
+                        raise failure()
+                    principal = renewed
+                    await safe_send({'type': 'auth_ready', 'expiresAt': principal.expires, 'expiresIn': max(0, principal.expires - int(time.time()))})
+                elif message.get('bytes'):
+                    await ensure_active(principal, db)
+                    if len(message['bytes']) > 2_000_000 or len(pending_audio_windows) >= 20:
+                        raise failure('MI-AUTH-102', 429)
+                    pending_audio_windows.append(message['bytes'])
             except asyncio.TimeoutError:
                 pass
 
             now = time.monotonic()
+            if now - last_auth_check >= 5:
+                await ensure_active(principal, db)
+                last_auth_check = now
             if transcription_task and transcription_task.done():
                 completed_task = transcription_task
                 transcription_task = None
@@ -180,7 +221,7 @@ async def meeting_stream(websocket: WebSocket):
                         type(error).__name__,
                         error,
                     )
-                    await websocket.send_json({"type": "transcription_state", "transcript": transcript_text, "warning": "Transcription failed for this audio segment. Listening continues."})
+                    await safe_send({"type": "transcription_state", "transcript": transcript_text, "warning": "Transcription failed for this audio segment. Listening continues."})
                 else:
                     window_start = transcribed_audio_end
                     new_segments = [
@@ -208,7 +249,7 @@ async def meeting_stream(websocket: WebSocket):
                     warning = None
                     if empty_audio_seconds >= 15 and transcript.get("audio_rms", 0) > 0.001:
                         warning = "Audio is arriving, but no words were recognized. Check the microphone input and speak clearly."
-                    await websocket.send_json({"type": "transcription_state", "transcript": transcript_text, "warning": warning})
+                    await safe_send({"type": "transcription_state", "transcript": transcript_text, "warning": warning})
                     if new_segments:
                         accepted_segments = meeting_context.add_segments(new_segments)
                         if accepted_segments:
@@ -361,7 +402,7 @@ async def meeting_stream(websocket: WebSocket):
                                         search_terms.query,
                                     )
                                 )
-                    await websocket.send_json(
+                    await safe_send(
                         {
                             "type": "llm_result",
                             "decision": result.event_type,
@@ -377,7 +418,7 @@ async def meeting_stream(websocket: WebSocket):
                                 description=description,
                                 confidence=event.score,
                             )
-                            await websocket.send_json(timeline.snapshot())
+                            await safe_send(timeline.snapshot())
                         else:
                             logger.warning(
                                 "%s skipped incomplete task suggestion data=%s",
@@ -403,7 +444,7 @@ async def meeting_stream(websocket: WebSocket):
                             type(error).__name__,
                             error,
                         )
-                        await websocket.send_json(
+                        await safe_send(
                             {
                                 "type": "RELATED_FILES",
                                 "source": "google_drive",
@@ -423,7 +464,7 @@ async def meeting_stream(websocket: WebSocket):
                         retrieval["ranking_latency_ms"],
                         [file["name"] for file in retrieval["files"]],
                     )
-                    await websocket.send_json(
+                    await safe_send(
                         {
                             "type": "RELATED_FILES",
                             "source": "google_drive",
@@ -436,7 +477,7 @@ async def meeting_stream(websocket: WebSocket):
                         files=retrieval["files"],
                     )
                     if search_item is not None:
-                        await websocket.send_json(timeline.snapshot())
+                        await safe_send(timeline.snapshot())
                 drive_tasks = still_running_drive
 
             if atlassian_tasks:
@@ -454,7 +495,7 @@ async def meeting_stream(websocket: WebSocket):
                         files = retrieval["sources"].get(source_id, [])
                         if not files:
                             continue
-                        await websocket.send_json({
+                        await safe_send({
                             "type": "RELATED_FILES", "source": source_id,
                             "query": retrieval["query"], "files": files,
                         })
@@ -462,7 +503,7 @@ async def meeting_stream(websocket: WebSocket):
                             query=retrieval["query"], files=files,
                             source_id=source_id, source_label=source_label,
                         )
-                        await websocket.send_json(timeline.snapshot())
+                        await safe_send(timeline.snapshot())
                     for source_id, error in retrieval.get("errors", {}).items():
                         logger.warning("%s search source=%s query=%r error=%s", _log_tag("ATLASSIAN"), source_id, query, error)
                 atlassian_tasks = still_running_atlassian
@@ -485,6 +526,8 @@ async def meeting_stream(websocket: WebSocket):
                     jev_task = asyncio.create_task(
                         evaluate_new_context(meeting_context, jev)
                     )
+    except (HTTPException, ValueError):
+        await websocket.close(code=4401, reason='MI-AUTH-105')
     except WebSocketDisconnect:
         if llm_tasks or drive_tasks or atlassian_tasks:
             logger.warning(
@@ -515,6 +558,7 @@ async def meeting_stream(websocket: WebSocket):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        await providers.aclose()
         if jev:
             await jev.close()
         if llm:

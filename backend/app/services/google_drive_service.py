@@ -146,10 +146,12 @@ class GoogleDriveService:
         settings: GoogleDriveSettings,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        token_store=None,
     ) -> None:
         self.settings = settings
-        self.token_store = GoogleDriveTokenStore(settings.token_path)
-        self._token_refresh_lock = Lock()
+        self.token_store = token_store if token_store is not None else GoogleDriveTokenStore(settings.token_path)
+        self._token_refresh_lock = token_store.refresh_lock if token_store is not None else None
+        self._local_refresh_lock = Lock()
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(settings.timeout_seconds, connect=3.0),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
@@ -244,11 +246,12 @@ class GoogleDriveService:
             "scope": self.settings.scopes,
         }
 
-    async def complete_authorization(self, code: str, state: str) -> dict[str, Any]:
+    async def complete_authorization(self, code: str, state: str, *, state_verified=False) -> dict[str, Any]:
         self._ensure_oauth_configured()
         if not code or not state:
             raise GoogleDriveOAuthError("Google did not return an authorization code and state")
-        self._verify_state(state)
+        if not state_verified:
+            self._verify_state(state)
         response = await self._client.post(
             GOOGLE_TOKEN_URL,
             data={
@@ -263,7 +266,7 @@ class GoogleDriveService:
             raise GoogleDriveOAuthError(_response_error(response, "Google token exchange failed"))
         payload = response.json()
         refresh_token = payload.get("refresh_token")
-        if not refresh_token:
+        if not refresh_token and not state_verified:
             existing = await self.token_store.read()
             refresh_token = existing.get("refresh_token") if existing else None
         if not refresh_token:
@@ -432,7 +435,7 @@ class GoogleDriveService:
         ):
             return str(token["access_token"])
 
-        async with self._token_refresh_lock:
+        async with self._token_refresh_lock() if self._token_refresh_lock else self._local_refresh_lock:
             # Another request may have refreshed the file while this request
             # waited for the lock.
             token = await self.token_store.read() or token
@@ -453,7 +456,7 @@ class GoogleDriveService:
                 },
             )
             if response.is_error:
-                if response.status_code == 400:
+                if response.status_code in (400, 401) and response.json().get('error') == 'invalid_grant':
                     await self.token_store.clear()
                     raise GoogleDriveAuthorizationRequiredError(
                         "Google Drive authorization expired or was revoked"

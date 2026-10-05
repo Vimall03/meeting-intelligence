@@ -115,13 +115,14 @@ class AtlassianServiceTests(unittest.IsolatedAsyncioTestCase):
         state = parse_qs(urlparse(start["authorization_url"]).query)["state"][0]
         await self.service.complete_authorization("code", state)
         app = FastAPI()
-        app.state.atlassian = self.service
+        from app.services.integrations import atlassian_service
+        app.dependency_overrides[atlassian_service] = lambda: self.service
         app.include_router(atlassian_router)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             projects = await client.get("/api/integrations/atlassian/jira/projects")
             self.assertEqual(projects.json()["projects"][0]["key"], "APP")
             created = await client.post("/api/integrations/atlassian/jira/tasks", json={
-                "project_id": "10001", "title": "Follow up", "description": "Discuss next steps",
+                "project_id": "10001", "site_url": "https://team.atlassian.net", "title": "Follow up", "description": "Discuss next steps",
             })
             self.assertEqual(created.status_code, 201)
             self.assertEqual(created.json()["key"], "APP-42")
@@ -137,7 +138,7 @@ class AtlassianServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(token, "renewed")
         self.assertEqual((await self.service.token_store.read())["refresh_token"], "rotated")
 
-    async def test_multiple_sites_need_explicit_site(self) -> None:
+    async def test_multiple_sites_have_a_deterministic_default_and_can_be_selected(self) -> None:
         self.service.settings = AtlassianSettings(
             client_id="client", client_secret="secret", redirect_uri="http://localhost:8000/callback",
             oauth_state_secret="state-secret", token_path=str(self.path),
@@ -146,5 +147,10 @@ class AtlassianServiceTests(unittest.IsolatedAsyncioTestCase):
             {"id": key, "url": f"https://{key}.atlassian.net", "scopes": ["read:jira-work", "search:confluence"]}
             for key in ("one", "two")
         ]
-        with self.assertRaisesRegex(AtlassianOAuthError, "Several Atlassian sites"):
-            self.service._select_resource(resources)
+        selected = self.service._select_resource(resources)
+        self.assertEqual(selected['id'], 'one')
+        await self.service.token_store.write({'access_token': 'access', 'refresh_token': 'refresh', 'resources': resources,
+            'cloud_id': selected['id'], 'site_url': selected['url'], 'scopes': selected['scopes']})
+        self.assertEqual(len(await self.service.list_sites()), 2)
+        await self.service.select_site('two')
+        self.assertEqual((await self.service.status())['site_url'], 'https://two.atlassian.net')
