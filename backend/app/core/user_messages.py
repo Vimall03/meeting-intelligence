@@ -5,6 +5,7 @@ return provider exception text to a person. New error pages must use this catalo
 """
 
 MESSAGES = {
+    "MI-CON-009": "Meeting Intelligence is getting ready. Try again shortly.",
     "MI-AUTH-108": "Check your details and try again.",
     "MI-AUTH-105": "Your sign-in has expired. Sign in again to continue.",
     "MI-AUTH-104": "We couldn’t confirm your sign-in. Try again in a moment.",

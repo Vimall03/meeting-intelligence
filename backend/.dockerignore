@@ -1,0 +1,13 @@
+# Allow only runtime code and locked dependency metadata into the build.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!uv.lock
+!run_server.py
+!healthcheck.py
+!app/
+!app/**/*.py
+app/**/__pycache__/
+**/.env*
+**/.data/
