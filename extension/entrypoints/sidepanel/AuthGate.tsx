@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import type { PublicSession } from '../../lib/auth-session';
 import { problem, userError } from '../../lib/user-messages';
 import { closeSidePanel } from '../../lib/side-panel';
+import { PolicyLinks } from './PolicyLinks';
 import './style.css';
 
 export function AuthGate({ children }: { children: (session: PublicSession) => ReactNode }) {
@@ -58,5 +59,6 @@ export function AuthGate({ children }: { children: (session: PublicSession) => R
     {sent && <div className="auth-links"><button disabled={busy || remaining > 0} onClick={() => void action('AUTH_REQUEST')}>{remaining ? `Resend in ${remaining}s` : 'Send a new code'}</button><button disabled={busy} onClick={() => { setSent(false); setCode(''); }}>Change email</button></div>}
     {error && <p className="auth-error" role="alert">{error}</p>}
     <p className="auth-hint">Live listening currently supports Google Meet.</p>
+    <PolicyLinks />
   </main>;
 }

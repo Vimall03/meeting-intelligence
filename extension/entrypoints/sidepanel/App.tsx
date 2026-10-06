@@ -1,4 +1,5 @@
 import { AuthGate } from './AuthGate';
+import { PolicyLinks } from './PolicyLinks';
 import { closeSidePanel } from '../../lib/side-panel';
 import { authenticatedFetch as fetch } from '../../lib/http';
 import { problem, userError, httpProblem, microphoneProblem } from '../../lib/user-messages';
@@ -892,8 +893,11 @@ function MeetingApp({ userId }: { userId: string }) {
 
 
       <footer className="footer">
-        <span title={`Version ${extensionVersion}`}>{activeTab?.title ? activeTab.title.length > 42 ? `${activeTab.title.slice(0, 39)}…` : activeTab.title : 'Active browser tab'}</span>
-        <button className="refresh-button" onClick={() => void refresh()} aria-label="Check connection" title="Check connection">↻</button>
+        <div className="footer-status">
+          <span title={`Version ${extensionVersion}`}>{activeTab?.title ? activeTab.title.length > 42 ? `${activeTab.title.slice(0, 39)}…` : activeTab.title : 'Active browser tab'}</span>
+          <button className="refresh-button" onClick={() => void refresh()} aria-label="Check connection" title="Check connection">↻</button>
+        </div>
+        <PolicyLinks />
       </footer>
     </main>
   );
