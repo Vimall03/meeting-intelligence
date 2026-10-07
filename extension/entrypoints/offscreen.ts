@@ -30,6 +30,7 @@ let acknowledgedSequence = 0;
 let audioQueue: { sequence: number; data: Blob }[] = [];
 let sentThrough = 0;
 let lastServerMessageAt = 0;
+let retryMicrophoneCapture: (() => void) | undefined;
 
 function flushAudio() {
   const activeSocket = socket;
@@ -189,12 +190,15 @@ async function start(streamId: string, sessionId: string) {
   const generation = ++captureGeneration;
   await cleanup;
   if (generation !== captureGeneration) {
-    void selection.then((stream) => stream.getTracks().forEach((track) => track.stop()));
+    void selection.then((stream) => stream.getTracks().forEach((track) => track.stop()), () => undefined);
     throw new DOMException(problem('MI-CAP-006'), 'AbortError');
   }
   stopping = false;
   captureSessionId = sessionId;
-  const selectedTab = await selection;
+  const selectedTab = await selection.catch((error) => {
+    assertCurrent(generation);
+    throw error;
+  });
   if (generation !== captureGeneration || stopping) {
     selectedTab.getTracks().forEach((track) => track.stop());
     throw new DOMException(problem('MI-CAP-006'), 'AbortError');
@@ -227,13 +231,18 @@ async function start(streamId: string, sessionId: string) {
     await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: true }).catch(() => undefined);
     assertCurrent(generation);
   } catch (error) {
+    assertCurrent(generation);
     if (error instanceof Error && (error.name === 'NotAllowedError' || error.name === 'SecurityError')) {
-      const permission = await navigator.permissions.query({ name: 'microphone' as PermissionName }).catch(() => undefined);
-      if (permission?.state !== 'granted') {
+      const permission = await navigator.permissions?.query({ name: 'microphone' as PermissionName }).catch(() => undefined);
+      assertCurrent(generation);
+      // Passive "prompt" and unsupported permission queries cannot establish
+      // that a previous successful grant was revoked. Only explicit denial can.
+      if (permission?.state === 'denied') {
         await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: false }).catch(() => undefined);
+        assertCurrent(generation);
         throw new Error(problem('MI-MIC-001'));
       }
-      throw new Error(problem('MI-MIC-002'));
+      throw new Error(problem(permission?.state === 'granted' ? 'MI-MIC-002' : 'MI-MIC-001'));
     }
     throw error;
   }
@@ -278,8 +287,9 @@ async function start(streamId: string, sessionId: string) {
   let quietSince = Date.now();
   let recoveringMicrophone = false;
   let microphoneRecoveryAttempts = 0;
-  let microphoneUnavailableChecks = 0;
+  let microphonePausedSince: number | undefined;
   let nextMicrophoneRecoveryAt = 0;
+  let microphonePermissionBlocked = false;
   const recoverMicrophone = async () => {
     const now = Date.now();
     if (
@@ -287,17 +297,22 @@ async function start(streamId: string, sessionId: string) {
       || stopping
       || generation !== captureGeneration
       || now < nextMicrophoneRecoveryAt
+      || microphonePermissionBlocked
     ) return;
     recoveringMicrophone = true;
     notify({ audioWarning: problem('MI-MIC-004') });
     try {
-      // Release the unusable source before opening its replacement. Brave can
-      // reject a second request while a stale live-but-muted track still owns
-      // the input device.
-      microphoneSource?.disconnect();
-      microphoneStream?.getTracks().forEach((track) => track.stop());
-      microphoneSource = undefined;
-      microphoneStream = undefined;
+      // A live muted track may resume by itself after a device transition.
+      // Keep it connected until a replacement is ready, so a failed reopen
+      // cannot turn a temporary pause into a permanently disconnected input.
+      const previousStream = microphoneStream;
+      const previousSource = microphoneSource;
+      if (!previousStream?.active || previousStream.getAudioTracks().every((track) => track.readyState === 'ended')) {
+        previousSource?.disconnect();
+        previousStream?.getTracks().forEach((track) => track.stop());
+        microphoneSource = undefined;
+        microphoneStream = undefined;
+      }
       const replacement = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false,
       });
@@ -305,13 +320,23 @@ async function start(streamId: string, sessionId: string) {
         replacement.getTracks().forEach((track) => track.stop());
         return;
       }
+      let replacementSource: MediaStreamAudioSourceNode | undefined;
+      try {
+        replacementSource = sessionContext.createMediaStreamSource(replacement);
+        replacementSource.connect(microphoneGain!);
+        replacementSource.connect(microphoneAnalyser);
+      } catch (error) {
+        replacementSource?.disconnect();
+        replacement.getTracks().forEach((track) => track.stop());
+        throw error;
+      }
+      previousSource?.disconnect();
+      previousStream?.getTracks().forEach((track) => track.stop());
       microphoneStream = replacement;
-      microphoneSource = sessionContext.createMediaStreamSource(replacement);
-      microphoneSource.connect(microphoneGain!);
-      microphoneSource.connect(microphoneAnalyser);
+      microphoneSource = replacementSource;
       quietSince = Date.now();
       microphoneRecoveryAttempts = 0;
-      microphoneUnavailableChecks = 0;
+      microphonePausedSince = undefined;
       nextMicrophoneRecoveryAt = 0;
       await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: true }).catch(() => undefined);
       if (stopping || generation !== captureGeneration) return;
@@ -323,7 +348,7 @@ async function start(streamId: string, sessionId: string) {
       nextMicrophoneRecoveryAt = Date.now() + retryDelayMs;
       let permissionState: PermissionState | undefined;
       if (error instanceof Error && ['NotAllowedError', 'SecurityError'].includes(error.name)) {
-        permissionState = await navigator.permissions.query({ name: 'microphone' as PermissionName })
+        permissionState = await navigator.permissions?.query({ name: 'microphone' as PermissionName })
           .then((permission) => permission.state)
           .catch(() => undefined);
       }
@@ -331,6 +356,7 @@ async function start(streamId: string, sessionId: string) {
       // A transient NotAllowedError from an automatic background reopen is
       // not proof that the user revoked a previously granted permission.
       if (permissionState === 'denied') {
+        microphonePermissionBlocked = true;
         await chrome.runtime.sendMessage({ type: 'MICROPHONE_PERMISSION_STATUS', granted: false }).catch(() => undefined);
       }
       if (stopping || generation !== captureGeneration) return;
@@ -341,6 +367,15 @@ async function start(streamId: string, sessionId: string) {
       });
     } finally {
       recoveringMicrophone = false;
+    }
+  };
+  retryMicrophoneCapture = () => {
+    if (stopping || generation !== captureGeneration) return;
+    microphonePermissionBlocked = false;
+    nextMicrophoneRecoveryAt = 0;
+    const tracks = microphoneStream?.getAudioTracks() ?? [];
+    if (!microphoneStream?.active || tracks.length === 0 || tracks.every((track) => track.readyState === 'ended' || track.muted)) {
+      void recoverMicrophone();
     }
   };
   // A recording can continue producing silent WebM windows when its input
@@ -361,18 +396,22 @@ async function start(streamId: string, sessionId: string) {
     const microphoneEnded = microphoneStream?.active !== true || microphoneTracks.length === 0
       || microphoneTracks.every((track) => track.readyState === 'ended');
     if (microphoneEnded) {
-      microphoneUnavailableChecks = 0;
+      microphonePausedSince = undefined;
       void recoverMicrophone();
       return;
     }
     const microphonePaused = microphoneTracks.every((track) => track.muted || !track.enabled);
     if (microphonePaused) {
-      microphoneUnavailableChecks += 1;
-      if (microphoneUnavailableChecks >= 3) void recoverMicrophone();
-      else notify({ audioWarning: problem('MI-MIC-005') });
+      microphonePausedSince ??= Date.now();
+      // Avoid reopening healthy tracks during short system/meeting pauses, or
+      // overriding a disabled track. A sustained browser mute can be recovered
+      // without releasing the original input before the replacement succeeds.
+      if (Date.now() - microphonePausedSince >= 30_000 && microphoneTracks.some((track) => track.enabled)) {
+        void recoverMicrophone();
+      } else notify({ audioWarning: problem('MI-MIC-005') });
       return;
     }
-    microphoneUnavailableChecks = 0;
+    microphonePausedSince = undefined;
     if (recoveringMicrophone) return;
     const hasAudio = level(microphoneAnalyser) > 0.001 || level(tabAnalyser) > 0.001;
     if (hasAudio) quietSince = Date.now();
@@ -394,6 +433,7 @@ async function start(streamId: string, sessionId: string) {
     flushAudio();
   };
   activeRecorder.onstop = () => {
+    if (recorder !== activeRecorder || stopping) return;
     if (recordingWindowTimer) clearTimeout(recordingWindowTimer);
     recordingWindowTimer = undefined;
     startRecordingWindow(activeRecorder);
@@ -425,11 +465,33 @@ async function stop() {
   audioHealthTimer = undefined;
   const activeRecorder = recorder;
   recorder = undefined;
+  const activeRecordingStream = recordingStream;
+  const activeTabStream = tabStream;
+  const activeMicrophoneStream = microphoneStream;
+  const activeAudioContext = audioContext;
+  const activeSocket = socket;
+  const activeTabSource = tabSource;
+  const activeMicrophoneSource = microphoneSource;
+  const activeTabGain = tabGain;
+  const activeMicrophoneGain = microphoneGain;
+  // Detach everything before the first await. A second stop or later start
+  // must never inherit these references or have them erased by late cleanup.
+  recordingStream = tabStream = microphoneStream = undefined;
+  audioContext = undefined;
+  socket = undefined;
+  tabSource = microphoneSource = undefined;
+  tabGain = microphoneGain = undefined;
+  retryMicrophoneCapture = undefined;
 
   // Release the selected tab and mic before waiting for MediaRecorder to stop.
-  recordingStream?.getTracks().forEach((track) => track.stop());
-  tabStream?.getTracks().forEach((track) => track.stop());
-  microphoneStream?.getTracks().forEach((track) => track.stop());
+  activeRecordingStream?.getTracks().forEach((track) => track.stop());
+  activeTabStream?.getTracks().forEach((track) => track.stop());
+  activeMicrophoneStream?.getTracks().forEach((track) => track.stop());
+  activeSocket?.close();
+  activeTabSource?.disconnect();
+  activeMicrophoneSource?.disconnect();
+  activeTabGain?.disconnect();
+  activeMicrophoneGain?.disconnect();
 
   if (activeRecorder && activeRecorder.state !== 'inactive') {
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -450,29 +512,19 @@ async function stop() {
     }
     await recorderStopped;
   }
-  tabSource?.disconnect();
-  microphoneSource?.disconnect();
-  tabGain?.disconnect();
-  microphoneGain?.disconnect();
-  tabSource = undefined;
-  microphoneSource = undefined;
-  tabGain = undefined;
-  microphoneGain = undefined;
-  const activeAudioContext = audioContext;
-  audioContext = undefined;
   try { await activeAudioContext?.close(); } catch { /* Context may already be closed. */ }
-  recordingStream = undefined;
-  tabStream = undefined;
-  microphoneStream = undefined;
-  socket?.close();
-  socket = undefined;
 }
 
 function notify(state: Record<string, unknown>) {
   chrome.runtime.sendMessage({ type: 'CAPTURE_STATE', captureSessionId, state }).catch(() => undefined);
 }
 
-chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string; captureSessionId?: string }, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string; captureSessionId?: string; granted?: boolean }, _sender, sendResponse) => {
+  if (message.type === 'MIC_PERMISSION_RESULT' && message.granted
+    && _sender.url === chrome.runtime.getURL('mic-permission.html')) {
+    retryMicrophoneCapture?.();
+    return false;
+  }
   if (_sender.tab) return false;
   if (message.type === 'GET_OFFSCREEN_STATUS') {
     sendResponse({ active: !stopping && tabStream?.active === true });

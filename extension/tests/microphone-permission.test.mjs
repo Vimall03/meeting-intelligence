@@ -2,17 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveMicrophonePermission, isMicrophonePermissionError } from '../lib/microphone-permission.ts';
 
-test('the browser permission state overrides a stale remembered hint', () => {
-  assert.equal(resolveMicrophonePermission('prompt', true), 'prompt');
+test('an explicit browser denial overrides a remembered successful request', () => {
   assert.equal(resolveMicrophonePermission('denied', true), 'denied');
   assert.equal(resolveMicrophonePermission('granted', false), 'granted');
 });
 
-test('a remembered grant is only used when the Permissions API is unavailable', () => {
+test('a remembered grant survives an inconclusive sidepanel permission query', () => {
+  assert.equal(resolveMicrophonePermission('prompt', true), 'granted');
   assert.equal(resolveMicrophonePermission(undefined, true), 'granted');
   assert.equal(resolveMicrophonePermission(undefined, false), 'prompt');
 });
-test('explicit revocation wins; a new user still needs to enable the microphone', () => {
+test('a new user still needs to enable the microphone', () => {
   assert.equal(resolveMicrophonePermission('prompt', false), 'prompt');
 });
 

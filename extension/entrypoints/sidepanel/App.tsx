@@ -10,7 +10,7 @@ import { isTimelineForMeeting, meetingIdFromUrl } from '../../lib/meeting-sessio
 import { visibleTimelineItems } from '../../lib/timeline';
 import { loadJiraProjects, submitJiraTask } from '../../lib/jira-tasks';
 import type { JiraProject } from '../../lib/jira-tasks';
-import { MICROPHONE_PERMISSION_KEY, resolveMicrophonePermission, isMicrophonePermissionError } from '../../lib/microphone-permission';
+import { MICROPHONE_PERMISSION_KEY, resolveMicrophonePermission } from '../../lib/microphone-permission';
 import {
   GOOGLE_DRIVE_AUTH_RESULT_KEY,
   GOOGLE_DRIVE_AUTH_START_URL,
@@ -235,6 +235,8 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
   const [readyTabId, setReadyTabId] = useState<number>();
   const activeTabId = useRef<number | undefined>(undefined);
   const microphoneRequestTabId = useRef<number | undefined>(undefined);
+  const microphoneReturnTabId = useRef<number | undefined>(undefined);
+  const microphonePermissionRevision = useRef(0);
   const refreshSequence = useRef(0);
   const contentScriptMissingRef = useRef(false);
   const atlassianNeedsWriteRef = useRef(false);
@@ -353,6 +355,12 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
           meetingStatus: next.meetingTabId === activeTabId.current ? next.meetingStatus : previous.meetingStatus,
         }),
       }));
+      // A real capture attempt can need a fresh interactive grant even when a
+      // passive browser query still reports the previously remembered hint.
+      if (next.error === problem('MI-MIC-001') || next.audioWarning === problem('MI-MIC-001')) {
+        microphonePermissionRevision.current++;
+        setMicrophone('prompt');
+      }
       if (next.captureStatus === 'error' && next.error) setNotice(undefined);
       if (next.captureStatus === 'connecting' || next.captureStatus === 'capturing') setNotice(undefined);
     };
@@ -361,10 +369,19 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
       if (message.type === 'STATE') updateFromBroadcast(message.state);
       if (message.type === 'MIC_PERMISSION_RESULT') {
         microphoneRequestTabId.current = undefined;
-        if (message.granted || isMicrophonePermissionError(message.errorName)) {
+        if (message.granted && microphoneReturnTabId.current !== undefined) {
+          void chrome.tabs.update(microphoneReturnTabId.current, { active: true }).catch(() => undefined);
+          microphoneReturnTabId.current = undefined;
+        }
+        const revision = ++microphonePermissionRevision.current;
+        if (message.granted || message.permissionState === 'denied') {
           setMicrophone(message.granted ? 'granted' : 'denied');
         } else {
-          void chrome.storage.local.get(MICROPHONE_PERMISSION_KEY).then((saved) => setMicrophone(resolveMicrophonePermission(undefined, saved[MICROPHONE_PERMISSION_KEY] === true)));
+          void chrome.storage.local.get(MICROPHONE_PERMISSION_KEY).then((saved) => {
+            if (revision === microphonePermissionRevision.current) {
+              setMicrophone(resolveMicrophonePermission(message.permissionState, saved[MICROPHONE_PERMISSION_KEY] === true));
+            }
+          });
         }
         setNotice(message.granted
           ? { tone: 'success', text: 'Microphone access is ready. Start listening when you are ready.' }
@@ -374,6 +391,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
     const onStorageChange = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
       if (areaName === 'session' && changes.state?.newValue) updateFromBroadcast(changes.state.newValue as ExtensionState);
       if (areaName === 'local' && MICROPHONE_PERMISSION_KEY in changes) {
+        microphonePermissionRevision.current++;
         const granted = changes[MICROPHONE_PERMISSION_KEY]?.newValue === true;
         setMicrophone((current) => granted ? 'granted' : current === 'denied' ? 'denied' : 'prompt');
       }
@@ -398,8 +416,10 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
     const onRemoved = (tabId: number) => {
       if (tabId === microphoneRequestTabId.current) {
         microphoneRequestTabId.current = undefined;
+        const revision = ++microphonePermissionRevision.current;
         void readMicrophonePermission().then(async (permission) => {
           const saved = await chrome.storage.local.get(MICROPHONE_PERMISSION_KEY);
+          if (revision !== microphonePermissionRevision.current) return;
           setMicrophone(resolveMicrophonePermission(permission, saved[MICROPHONE_PERMISSION_KEY] === true));
           if (permission === 'denied') await chrome.storage.local.set({ [MICROPHONE_PERMISSION_KEY]: false });
         });
@@ -472,8 +492,9 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
         if (cancelled) return;
         permissionStatus = permission;
         const applyPermission = async () => {
+          const revision = ++microphonePermissionRevision.current;
           const latest = await chrome.storage.local.get(MICROPHONE_PERMISSION_KEY);
-          if (cancelled) return;
+          if (cancelled || revision !== microphonePermissionRevision.current) return;
           const next = resolveMicrophonePermission(permission.state, latest[MICROPHONE_PERMISSION_KEY] === true);
           setMicrophone((current) => current === 'requesting' && next === 'prompt' ? current : next);
           if (permission.state !== 'prompt') {
@@ -520,10 +541,12 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
     setMicrophone('requesting');
     setNotice({ tone: 'info', text: 'Opening your microphone permission request…' });
     try {
+      microphoneReturnTabId.current = activeTab?.id;
       const tab = await chrome.tabs.create({ url: chrome.runtime.getURL('mic-permission.html'), active: true });
       if (tab.id === undefined) throw new Error(problem('MI-MIC-010'));
       microphoneRequestTabId.current = tab.id;
     } catch (error) {
+      microphoneReturnTabId.current = undefined;
       setMicrophone('prompt');
       setNotice({ tone: 'error', text: userError(error, 'MI-MIC-010') });
     } finally {
@@ -612,15 +635,15 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
 
   const startCapture = async () => {
     if (!activeTab?.id || state.meetingStatus !== 'in-meeting') {
-      setNotice({ tone: 'info', text: 'Join a Google Meet call before you start listening.' });
+      setNotice({ tone: 'info', text: problem('MI-CAP-001') });
       return;
     }
     if (microphone !== 'granted') {
-      setNotice({ tone: 'info', text: 'Enable microphone access here first.' });
+      setNotice({ tone: 'info', text: problem('MI-MIC-001') });
       return;
     }
     if (readyTabId !== activeTab.id) {
-      setNotice({ tone: 'info', text: 'Getting your meeting ready. Try again in a moment.' });
+      setNotice({ tone: 'info', text: problem('MI-CAP-010') });
       return;
     }
     setBusy(true);
@@ -707,11 +730,6 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
       {state.captureStatus === 'error' && state.error
         ? <div className="notice error" role="alert">{userError(state.error, 'MI-CAP-004')}</div>
         : notice && <div className={`notice ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.tone === 'error' ? userError(notice.text) : notice.text}</div>}
-      {state.meetMicrophoneProblem && (
-        <div className="notice error" role="alert">
-          {problem('MI-MIC-009')}
-        </div>
-      )}
       {capturingHere && state.audioWarning && (
         <div className={`notice ${state.audioWarning.includes('blocked') ? 'error' : 'info'}`} role="status">
           {userError(state.audioWarning, 'MI-MIC-004')}
@@ -732,7 +750,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
       {running && (
         <div className="actions">
           <button className="stop-button" onClick={stopCapture} disabled={busy}>
-            <span className="stop-square" aria-hidden="true" />{busy ? 'Stopping…' : 'Stop listening'}
+            <span className="stop-square" aria-hidden="true" />{busy ? state.captureStatus === 'connecting' ? 'Starting…' : 'Stopping…' : 'Stop listening'}
           </button>
         </div>
       )}
@@ -747,8 +765,8 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
 
       {/* Keep activity mounted so moving between views preserves task drafts and created-task links. */}
       <div className="meeting-view" hidden={settingsOpen}>
-      {!running && microphone !== 'granted' && microphone !== 'checking' && <section className="microphone-setup">
-        <div><h2>Include your voice</h2><p>Allow microphone access before you start listening.</p></div>
+      {!running && inMeeting && microphone !== 'granted' && microphone !== 'checking' && <section className="microphone-setup">
+        <div><h2>Include your voice</h2><p>Allow microphone access before you start listening. If your browser asks how long to remember it, choose “forever” to keep access enabled.</p></div>
         <button className="permission-button" onClick={requestMicrophone} disabled={busy || microphone === 'requesting'}>
           {microphone === 'requesting' ? 'Waiting for permission…' : microphone === 'denied' ? 'Retry microphone access' : 'Enable microphone'}
         </button>
@@ -897,7 +915,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
         {microphone === 'denied' && (
           <details className="permission-help">
             <summary>How to allow microphone access</summary>
-            <p>Select Retry microphone access and allow access in your browser. If the request doesn’t appear, open your browser’s extensions settings → Meeting Intelligence → Details → Site settings → Microphone.</p>
+            <p>Select Retry microphone access and allow access in your browser. If you see Remember my decision, choose “forever” to keep access enabled. If the request doesn’t appear, open your browser’s extensions settings → Meeting Intelligence → Details → Site settings → Microphone.</p>
             <p>After you allow access, the request tab closes and this panel updates automatically.</p>
           </details>
         )}

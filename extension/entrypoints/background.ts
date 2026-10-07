@@ -3,7 +3,7 @@ import { BACKEND_HTTP_BASE_URL } from '../lib/config';
 import { problem, userError, httpProblem } from '../lib/user-messages';
 import type { ExtensionMessage, ExtensionState } from '../lib/types';
 import { didMeetingEnd, isTimelineForMeeting, meetingIdFromUrl } from '../lib/meeting-session';
-import { MICROPHONE_PERMISSION_KEY, isMicrophonePermissionError } from '../lib/microphone-permission';
+import { MICROPHONE_PERMISSION_KEY } from '../lib/microphone-permission';
 import { probeWithContentScriptRecovery } from '../lib/content-script-recovery';
 import {
   GOOGLE_DRIVE_AUTH_RESULT_KEY,
@@ -15,7 +15,6 @@ import {
 const OFFSCREEN_URL = 'offscreen-page.html';
 const meetingStatuses = new Map<number, ExtensionState['meetingStatus']>();
 const meetingIds = new Map<number, string>();
-const meetingMicrophoneProblems = new Map<number, boolean>();
 const processingDriveOAuthTabs = new Set<number>();
 let state: ExtensionState = {
   meetingStatus: 'unknown',
@@ -23,15 +22,20 @@ let state: ExtensionState = {
   backendConnected: false,
 };
 let offscreenCreation: Promise<void> | undefined;
-let captureOperation: Promise<void> = Promise.resolve();
+let captureOperation: Promise<unknown> = Promise.resolve();
+let captureCancellation = 0;
+let pendingCaptureTabId: number | undefined;
 let initialization: Promise<void> | undefined;
 let broadcastOperation: Promise<void> = Promise.resolve();
 let authEpoch = 0;
 let auth: ReturnType<typeof createBackgroundAuth>;
 function initializeAuth() { return createBackgroundAuth(async () => {
   authEpoch++;
+  captureCancellation++;
   await initializeState();
-  await enqueue(stopCapture);
+  // Sign-in refresh can invoke this callback inside a queued start. Do not
+  // queue behind that same start: revoked access must interrupt it now.
+  await stopCapture();
   state = { ...state, timeline: undefined, timelineOwner: undefined, captureSessionId: undefined, error: undefined };
   await broadcast();
   await chrome.runtime.sendMessage({ type: 'AUTH_CHANGED' }).catch(() => undefined);
@@ -120,10 +124,8 @@ function recordMeetingStatus(
   tabId: number,
   status: ExtensionState['meetingStatus'],
   meetingId?: string,
-  meetMicrophoneProblem = false,
 ): boolean {
   meetingStatuses.set(tabId, status);
-  meetingMicrophoneProblems.set(tabId, meetMicrophoneProblem);
   if (status === 'in-meeting' && meetingId) meetingIds.set(tabId, meetingId);
   else meetingIds.delete(tabId);
   const ended = didMeetingEnd(state.timelineOwner, tabId, status, meetingId);
@@ -136,32 +138,34 @@ async function checkMeetingTab(tabId: number) {
   try {
     const response = await probeWithContentScriptRecovery({
       probe: () => chrome.tabs.sendMessage(tabId, { type: 'GET_MEETING_STATUS' }) as Promise<{
-        status?: ExtensionState['meetingStatus']; meetingId?: string; meetMicrophoneProblem?: boolean;
+        status?: ExtensionState['meetingStatus']; meetingId?: string;
       }>,
       inject: async (files) => {
         await chrome.scripting.executeScript({ target: { tabId }, files });
       },
       manifest: chrome.runtime.getManifest(),
     }) as {
-      status?: ExtensionState['meetingStatus']; meetingId?: string; meetMicrophoneProblem?: boolean;
+      status?: ExtensionState['meetingStatus']; meetingId?: string;
     };
     connected = true;
-    if (response?.status) recordMeetingStatus(tabId, response.status, response.meetingId, response.meetMicrophoneProblem);
+    if (response?.status) recordMeetingStatus(tabId, response.status, response.meetingId);
   } catch { /* The caller receives the active-Meet error below. */ }
   return { connected, inMeeting: connected && meetingStatuses.get(tabId) === 'in-meeting' };
 }
 
 async function prepareCapture(tabId: number) {
   await initializeState();
+  if (state.captureStatus === 'capturing' || state.captureStatus === 'connecting') {
+    return { ok: false, error: problem('MI-CAP-002') };
+  }
   if (!(await checkMeetingTab(tabId)).inMeeting) {
     state = { ...state, captureStatus: 'error', error: problem('MI-CAP-001') };
     await broadcast();
     return { ok: false, error: state.error };
   }
-  if (state.captureStatus === 'capturing' || state.captureStatus === 'connecting') {
-    return { ok: false, error: problem('MI-CAP-002') };
-  }
-  await ensureOffscreen();
+  // Refresh sign-in and load the audio page before Start is clicked. A tab
+  // stream ID expires after a few seconds and must never wait on this work.
+  await Promise.all([auth.access(), ensureOffscreen()]);
   state = { ...state, meetingStatus: 'in-meeting', meetingTabId: tabId, captureStatus: 'idle', error: undefined };
   await broadcast();
   return { ok: true };
@@ -169,56 +173,67 @@ async function prepareCapture(tabId: number) {
 
 function startCapture(tabId: number) {
   const epoch = authEpoch;
-  if (state.captureStatus === 'capturing' || state.captureStatus === 'connecting') {
-    return Promise.resolve({ ok: false, error: problem('MI-CAP-002') });
-  }
-  const restoredState = initializeState();
-  // Call tabCapture immediately from the click message. The browser's result
-  // is the authority on whether this tab was granted capture access.
-  const streamIdRequest = new Promise<string>((resolve, reject) => {
-    chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (streamId) => {
-      const error = chrome.runtime.lastError;
-      if (error) reject(new Error(error.message));
-      else if (streamId) resolve(streamId);
-      else reject(new Error(problem('MI-CAP-003')));
-    });
-  });
-  return Promise.all([restoredState, streamIdRequest]).then(async ([, streamId]) => {
-    await auth.access();
-    if (epoch !== authEpoch) throw new Error(problem('MI-AUTH-105'));
-    if (state.captureStatus === 'capturing' || state.captureStatus === 'connecting') {
-      return { ok: false, error: problem('MI-CAP-002'), state };
-    }
-    await ensureOffscreen();
-    if (!(await checkMeetingTab(tabId)).inMeeting) throw new Error(problem('MI-CAP-001'));
-    const meetingId = meetingIds.get(tabId);
-    if (!meetingId) throw new Error(problem('MI-CAP-004'));
-    const captureSessionId = crypto.randomUUID();
-    state = { ...state, meetingStatus: 'in-meeting', meetingTabId: tabId, captureTabId: tabId, captureSessionId, captureStatus: 'connecting', backendConnected: false, timeline: undefined, audioWarning: undefined, timelineOwner: { tabId, meetingId }, error: undefined };
-    void broadcast();
-    if (epoch !== authEpoch) throw new Error(problem('MI-AUTH-105'));
-    const result = await chrome.runtime.sendMessage({ type: 'START_OFFSCREEN', streamId, captureSessionId }) as { ok?: boolean; error?: string } | undefined;
-    if (!result?.ok) {
-      if (state.captureStatus === 'idle') return { ok: false, error: problem('MI-CAP-006'), state };
-      if (state.captureStatus !== 'error') {
-        state = { ...state, captureStatus: 'error', error: result?.error ?? problem('MI-CAP-004') };
-        await broadcast();
+  const cancellation = captureCancellation;
+  return enqueue(async () => {
+    try {
+      await initializeState();
+      if (epoch !== authEpoch) throw new Error(problem('MI-AUTH-105'));
+      if (cancellation !== captureCancellation) return { ok: false, error: problem('MI-CAP-006'), state };
+      if (state.captureStatus === 'capturing' || state.captureStatus === 'connecting') {
+        return { ok: false, error: problem('MI-CAP-002'), state };
       }
+      pendingCaptureTabId = tabId;
+      const [, , meeting] = await Promise.all([auth.access(), ensureOffscreen(), checkMeetingTab(tabId)]);
+      if (epoch !== authEpoch) throw new Error(problem('MI-AUTH-105'));
+      if (cancellation !== captureCancellation) return { ok: false, error: problem('MI-CAP-006'), state };
+      if (!meeting.inMeeting) throw new Error(problem('MI-CAP-001'));
+      const meetingId = meetingIds.get(tabId);
+      if (!meetingId) throw new Error(problem('MI-CAP-004'));
+      const tab = await chrome.tabs.get(tabId);
+      if (meetingIdFromUrl(tab.url) !== meetingId) throw new Error(problem('MI-CAP-001'));
+      if (cancellation !== captureCancellation) return { ok: false, error: problem('MI-CAP-006'), state };
+
+      // Toolbar invocation grants activeTab for this tab until navigation. Its
+      // grant survives awaited setup, but the single-use stream ID does not.
+      // Mint the ID last and hand it to the audio page immediately.
+      const streamId = await new Promise<string>((resolve, reject) => {
+        chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (id) => {
+          const error = chrome.runtime.lastError;
+          if (error) reject(new Error(error.message));
+          else if (id) resolve(id);
+          else reject(new Error(problem('MI-CAP-003')));
+        });
+      });
+      const captureSessionId = crypto.randomUUID();
+      state = { ...state, meetingStatus: 'in-meeting', meetingTabId: tabId, captureTabId: tabId, captureSessionId, captureStatus: 'connecting', backendConnected: false, timeline: undefined, audioWarning: undefined, timelineOwner: { tabId, meetingId }, error: undefined };
+      void broadcast();
+      if (epoch !== authEpoch) throw new Error(problem('MI-AUTH-105'));
+      if (cancellation !== captureCancellation) return { ok: false, error: problem('MI-CAP-006'), state };
+      const result = await chrome.runtime.sendMessage({ type: 'START_OFFSCREEN', streamId, captureSessionId }) as { ok?: boolean; error?: string } | undefined;
+      if (!result?.ok) {
+        if (state.captureStatus === 'idle') return { ok: false, error: problem('MI-CAP-006'), state };
+        if (state.captureStatus !== 'error') {
+          state = { ...state, captureStatus: 'error', error: result?.error ?? problem('MI-CAP-004') };
+          await broadcast();
+        }
+        return { ok: false, error: state.error, state };
+      }
+      return { ok: true, state };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : problem('MI-CAP-004');
+      const needsInvocation = /not been invoked|activeTab permission|permission for the specified tab/i.test(message);
+      state = {
+        ...state,
+        captureStatus: 'error',
+        error: needsInvocation
+          ? problem('MI-CAP-003')
+          : userError(error, 'MI-CAP-004'),
+      };
+      await broadcast();
       return { ok: false, error: state.error, state };
+    } finally {
+      pendingCaptureTabId = undefined;
     }
-    return { ok: true, state };
-  }).catch(async (error: unknown) => {
-    const message = error instanceof Error ? error.message : problem('MI-CAP-004');
-    const needsInvocation = /not been invoked|activeTab permission|permission for the specified tab/i.test(message);
-    state = {
-      ...state,
-      captureStatus: 'error',
-      error: needsInvocation
-        ? problem('MI-CAP-003')
-        : userError(error, 'MI-CAP-004'),
-    };
-    await broadcast();
-    return { ok: false, error: state.error, state };
   });
 }
 
@@ -239,7 +254,7 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
   }
   if (message.type === 'START_CAPTURE') return startCapture(sender.tab?.id ?? message.tabId);
   if (message.type === 'MIC_PERMISSION_RESULT') {
-    if (message.granted || isMicrophonePermissionError(message.errorName)) {
+    if (message.granted || message.permissionState === 'denied') {
       await chrome.storage.local.set({ [MICROPHONE_PERMISSION_KEY]: message.granted });
     }
     if (message.granted) {
@@ -273,11 +288,12 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
   await initializeState();
   if (message.type === 'MEETING_STATUS') {
     const tabId = sender.tab?.id ?? message.tabId;
-    const ended = recordMeetingStatus(tabId, message.status, message.meetingId, message.meetMicrophoneProblem);
+    const ended = recordMeetingStatus(tabId, message.status, message.meetingId);
     if (state.captureStatus === 'idle' || state.meetingTabId === tabId) {
       state = { ...state, meetingStatus: message.status, meetingTabId: tabId };
     }
-    if ((message.status !== 'in-meeting' || ended) && state.captureTabId === tabId && state.captureStatus !== 'idle') await enqueue(stopCapture);
+    if ((message.status !== 'in-meeting' || ended)
+        && (pendingCaptureTabId === tabId || (state.captureTabId === tabId && state.captureStatus !== 'idle'))) await requestStopCapture();
     else await broadcast();
     return { ok: true };
   } else if (message.type === 'GET_STATE') {
@@ -285,7 +301,6 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
     return tabId === undefined ? state : {
       ...state,
       meetingStatus: meetingStatuses.get(tabId) ?? 'unknown',
-      meetMicrophoneProblem: meetingMicrophoneProblems.get(tabId) ?? false,
       meetingTabId: tabId,
       timeline: isTimelineForMeeting(state.timelineOwner, tabId, meetingIds.get(tabId), meetingStatuses.get(tabId) ?? 'unknown') ? state.timeline : undefined,
     };
@@ -294,13 +309,12 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
     return {
       status: meetingStatuses.get(message.tabId) ?? 'unknown',
       meetingId: meetingIds.get(message.tabId),
-      meetMicrophoneProblem: meetingMicrophoneProblems.get(message.tabId) ?? false,
       contentScriptMissing: !result.connected,
     };
   } else if (message.type === 'PREPARE_CAPTURE') {
-    return prepareCapture(sender.tab?.id ?? message.tabId);
+    return enqueue(() => prepareCapture(sender.tab?.id ?? message.tabId));
   } else if (message.type === 'STOP_CAPTURE') {
-    await enqueue(stopCapture);
+    await requestStopCapture();
     return { ok: true, state };
   } else if (message.type === 'CAPTURE_STATE') {
     if (!trusted(sender) || !sender.url?.endsWith('/offscreen-page.html')) return { ok: false };
@@ -333,9 +347,15 @@ async function stopCapture() {
   await broadcast();
 }
 
-function enqueue(operation: () => Promise<void>) {
-  captureOperation = captureOperation.then(operation, operation);
-  return captureOperation;
+function enqueue<T>(operation: () => Promise<T>): Promise<T> {
+  const next = captureOperation.then(operation, operation);
+  captureOperation = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+function requestStopCapture() {
+  captureCancellation++;
+  return enqueue(stopCapture);
 }
 
 async function handleTabRemoved(tabId: number) {
@@ -346,7 +366,7 @@ async function handleTabRemoved(tabId: number) {
     state = { ...state, timeline: undefined, timelineOwner: undefined, captureSessionId: undefined };
     void broadcast();
   }
-  if (state.captureTabId === tabId && state.captureStatus !== 'idle') void enqueue(stopCapture);
+  if (pendingCaptureTabId === tabId || (state.captureTabId === tabId && state.captureStatus !== 'idle')) void requestStopCapture();
   void handleGoogleDriveOAuthTabClosed(tabId);
 }
 
@@ -357,11 +377,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 async function handleTabUpdated(tabId: number, change: chrome.tabs.TabChangeInfo) {
   await initializeState();
   if (!change.url) return;
+  if (pendingCaptureTabId === tabId && meetingIdFromUrl(change.url) !== meetingIds.get(tabId)) {
+    void requestStopCapture();
+  }
   if (state.timelineOwner?.tabId === tabId && meetingIdFromUrl(change.url) !== state.timelineOwner.meetingId) {
     state = { ...state, timeline: undefined, timelineOwner: undefined, captureSessionId: undefined };
     meetingIds.delete(tabId);
     void broadcast();
-    if (state.captureTabId === tabId && state.captureStatus !== 'idle') void enqueue(stopCapture);
+    if (state.captureTabId === tabId && state.captureStatus !== 'idle') void requestStopCapture();
   }
 }
 

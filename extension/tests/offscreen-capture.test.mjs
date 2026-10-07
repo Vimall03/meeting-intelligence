@@ -5,15 +5,17 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 
-function harness({ failReplacementName, permissionState = 'prompt', deferReplacement = false, acknowledge = true, clock = { now: Date.now() } } = {}) {
+function harness({ failInitialName, failReplacementName, permissionState = 'prompt', deferReplacement = false, deferFirstClose = false, deferFirstRecorderStop = false, acknowledge = true, clock = { now: Date.now() } } = {}) {
   const messages = [], timeouts = new Map(), intervals = new Map(), sockets = [], recorders = [], contexts = [];
   let listener, timer = 0, serverAck = 0;
   class Clock extends Date { static now() { return clock.now; } }
   const track = () => ({ readyState: 'live', muted: false, enabled: true, stop() { this.readyState = 'ended'; } });
   const stream = () => { const audio = track(); return { active: true, getTracks: () => [audio], getAudioTracks: () => [audio], getVideoTracks: () => [] }; };
   const tab = stream(), microphone = stream(), replacement = stream();
-  let micRequests = 0, resolveReplacement;
+  let micRequests = 0, tabRequests = 0, resolveReplacement, resolveFirstClose;
   const pendingReplacement = new Promise(resolve => { resolveReplacement = resolve; });
+  const pendingFirstClose = new Promise(resolve => { resolveFirstClose = resolve; });
+  const acquiredMicrophones = [], acquiredTabs = [];
   class Socket {
     static OPEN = 1;
     readyState = 1;
@@ -39,7 +41,8 @@ function harness({ failReplacementName, permissionState = 'prompt', deferReplace
     listeners = {};
     constructor() { recorders.push(this); }
     start() { this.state = 'recording'; }
-    stop() { this.state = 'inactive'; this.ondataavailable?.({ data: { size: 50 } }); this.onstop?.(); this.listeners.stop?.(); }
+    stop() { this.state = 'inactive'; if (deferFirstRecorderStop && this === recorders[0]) return; this.finishStop(); }
+    finishStop() { this.ondataavailable?.({ data: { size: 50 } }); this.onstop?.(); this.listeners.stop?.(); }
     addEventListener(name, callback) { this.listeners[name] = callback; }
   }
   const node = () => ({ connect() {}, disconnect() {}, gain: { value: 1 }, getFloatTimeDomainData(data) { data.fill(0.1); } });
@@ -49,7 +52,7 @@ function harness({ failReplacementName, permissionState = 'prompt', deferReplace
     resumed = 0;
     constructor() { contexts.push(this); }
     async resume() { this.resumed++; this.state = 'running'; }
-    async close() { this.state = 'closed'; }
+    async close() { if (deferFirstClose && this === contexts[0]) await pendingFirstClose; this.state = 'closed'; }
     createMediaStreamSource() { return node(); }
     createMediaStreamDestination() { return { ...node(), stream: stream() }; }
     createGain() { return node(); }
@@ -60,19 +63,25 @@ function harness({ failReplacementName, permissionState = 'prompt', deferReplace
     exports: {}, require(name) { if (name.includes('user-messages')) return userMessages; return name.includes('config') ? { AUDIO_MIME_TYPE: 'audio/webm', AUDIO_WINDOW_MS: 3000, MEETING_SOCKET_URL: 'ws://localhost' } : { isTimelineSnapshot: message => message.type === 'timeline_snapshot' }; },
     defineUnlistedScript: callback => callback(), queueMicrotask, Date: Clock, DOMException, Error, MediaRecorder: Recorder, WebSocket: Socket, AudioContext: Context,
     navigator: { mediaDevices: { async getUserMedia(options) {
-      if (options.audio.mandatory) return tab;
-      if (++micRequests === 1) return microphone;
-      if (deferReplacement) return pendingReplacement;
-      if (failReplacementName) throw new DOMException('Microphone reopen failed', failReplacementName);
-      return replacement;
+      if (options.audio.mandatory) { const selected = ++tabRequests === 1 ? tab : stream(); acquiredTabs.push(selected); return selected; }
+      if (++micRequests === 1) {
+        if (failInitialName) throw new DOMException('Microphone open failed', failInitialName);
+        acquiredMicrophones.push(microphone); return microphone;
+      }
+      if (deferReplacement && micRequests === 2) { const selected = await pendingReplacement; acquiredMicrophones.push(selected); return selected; }
+      if (failReplacementName && micRequests === 2) throw new DOMException('Microphone reopen failed', failReplacementName);
+      const selected = micRequests === 2 ? replacement : stream(); acquiredMicrophones.push(selected); return selected;
     } }, permissions: { async query() { return { state: permissionState }; } } },
-    chrome: { runtime: { onMessage: { addListener(callback) { listener = callback; } }, async sendMessage(message) { messages.push(message); if (message.type === 'MEETING_TICKET') return { ok: true, ticket: 'ticket' }; } } },
+    chrome: { runtime: { getURL: path => `chrome-extension://test/${path}`, onMessage: { addListener(callback) { listener = callback; } }, async sendMessage(message) { messages.push(message); if (message.type === 'MEETING_TICKET') return { ok: true, ticket: 'ticket' }; } } },
     setTimeout(callback, delay) { timeouts.set(++timer, { callback, delay }); return timer; }, clearTimeout(id) { timeouts.delete(id); },
     setInterval(callback, delay) { intervals.set(++timer, { callback, delay }); return timer; }, clearInterval(id) { intervals.delete(id); },
   });
-  return { messages, sockets, recorders, contexts, microphone, replacement, intervals,
+  return { messages, sockets, recorders, contexts, microphone, replacement, intervals, acquiredMicrophones, acquiredTabs,
+    get micRequests() { return micRequests; },
     resolveReplacement: () => resolveReplacement(replacement),
-    send: async message => { const result = await new Promise(resolve => listener(message, {}, resolve)); if (message.type === 'START_OFFSCREEN') { sockets.at(-1).onopen(); await new Promise(resolve => setImmediate(resolve)); } return result; },
+    resolveFirstClose: () => resolveFirstClose(),
+    grantMicrophone(url = 'chrome-extension://test/mic-permission.html') { listener({ type: 'MIC_PERMISSION_RESULT', granted: true }, { tab: { id: 2 }, url }, () => {}); },
+    send: async message => { const result = await new Promise(resolve => listener(message, {}, resolve)); if (message.type === 'START_OFFSCREEN' && result.ok) { sockets.at(-1).onopen(); await new Promise(resolve => setImmediate(resolve)); } return result; },
     window() { const [id, { callback }] = [...timeouts.entries()].find(([, task]) => task.delay === 3000); timeouts.delete(id); callback(); },
     renew() { const [id, { callback }] = [...timeouts.entries()].find(([, task]) => task.delay > 10000); timeouts.delete(id); callback(); },
     health() { for (const {callback, delay} of intervals.values()) if (delay !== 15000) callback(); },
@@ -113,7 +122,7 @@ test('capture resumes a suspended mixer and replaces a disconnected microphone',
   assert.equal(h.replacement.getTracks()[0].readyState, 'ended');
 });
 
-test('capture replaces a microphone that becomes muted while its track remains live', async () => {
+test('sustained mute replaces microphone after a grace period while a short pause preserves the input', async () => {
   const h = harness();
   await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
   const staleTrack = h.microphone.getTracks()[0];
@@ -123,6 +132,7 @@ test('capture replaces a microphone that becomes muted while its track remains l
   h.health();
   assert.equal(staleTrack.readyState, 'live');
   assert.match(h.messages.at(-1).state.audioWarning, /briefly paused/);
+  h.clock.now += 30_000;
   h.health();
   await new Promise(resolve => setImmediate(resolve));
 
@@ -132,6 +142,44 @@ test('capture replaces a microphone that becomes muted while its track remains l
   h.window();
   assert.equal(h.sockets[0].sent.length, 1);
   await h.send({ type: 'STOP_OFFSCREEN' });
+});
+
+test('a disabled live microphone is preserved instead of repeatedly reopened', async () => {
+  const h = harness();
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
+  const track = h.microphone.getTracks()[0];
+  track.enabled = false;
+  for (let i = 0; i < 30; i++) { h.clock.now += 3000; h.health(); }
+  assert.equal(h.micRequests, 1);
+  assert.equal(track.readyState, 'live');
+  track.enabled = true;
+  h.health();
+  assert.equal(h.messages.at(-1).state.audioWarning, undefined);
+  await h.send({ type: 'STOP_OFFSCREEN' });
+});
+
+test('failed muted-track replacement keeps the original input connected so it can resume', async () => {
+  const h = harness({ failReplacementName: 'NotAllowedError' });
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
+  const track = h.microphone.getTracks()[0];
+  track.muted = true;
+  h.health(); h.clock.now += 30_000; h.health();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(track.readyState, 'live');
+  track.muted = false;
+  h.health();
+  assert.equal(h.messages.at(-1).state.audioWarning, undefined);
+  assert.equal(h.recorders[0].state, 'recording');
+  await h.send({ type: 'STOP_OFFSCREEN' });
+});
+
+test('an inconclusive automatic startup error does not erase a remembered grant', async () => {
+  const h = harness({ failInitialName: 'NotAllowedError' });
+  const result = await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /MI-MIC-001/);
+  assert.equal(h.messages.some(message => message.type === 'MICROPHONE_PERMISSION_STATUS' && message.granted === false), false);
+  assert.equal(h.tab.getTracks()[0].readyState, 'ended');
 });
 
 test('failed microphone recovery keeps the websocket and Meet capture alive', async () => {
@@ -165,9 +213,10 @@ test('a transient automatic NotAllowedError does not revoke remembered microphon
   await h.send({ type: 'STOP_OFFSCREEN' });
 });
 
-test('an explicit denied permission state clears remembered microphone access', async () => {
+test('explicit denial waits for a trusted fresh grant and recovers without replacing capture resources', async () => {
   const h = harness({ failReplacementName: 'NotAllowedError', permissionState: 'denied' });
   await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
+  const socket = h.sockets[0], recorder = h.recorders[0], context = h.contexts[0];
   h.microphone.getTracks()[0].readyState = 'ended';
   h.health();
   await new Promise(resolve => setImmediate(resolve));
@@ -175,6 +224,23 @@ test('an explicit denied permission state clears remembered microphone access', 
   const permissionUpdates = h.messages.filter(message => message.type === 'MICROPHONE_PERMISSION_STATUS');
   assert.deepEqual(permissionUpdates.map(message => message.granted), [true, false]);
   assert.match(h.messages.at(-1).state.audioWarning, /blocked/);
+  for (let i = 0; i < 10; i++) { h.clock.now += 30_000; h.health(); }
+  assert.equal(h.micRequests, 2);
+  h.grantMicrophone('https://meet.google.com/abc-defg-hij');
+  h.grantMicrophone('chrome-extension://test/sidepanel.html');
+  h.grantMicrophone('chrome-extension://another-extension/mic-permission.html');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.micRequests, 2);
+  h.grantMicrophone();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.micRequests, 3);
+  assert.equal(h.messages.at(-1).state.audioWarning, undefined);
+  assert.deepEqual(h.sockets, [socket]);
+  assert.deepEqual(h.recorders, [recorder]);
+  assert.deepEqual(h.contexts, [context]);
+  assert.equal(h.acquiredMicrophones.at(-1).getTracks()[0].readyState, 'live');
+  h.window();
+  assert.equal(socket.sent.length, 1);
   await h.send({ type: 'STOP_OFFSCREEN' });
 });
 
@@ -219,6 +285,55 @@ test('stopping while microphone recovery is pending releases the late replacemen
   assert.equal(h.contexts[0].state, 'closed');
   assert.equal(h.sockets[0].readyState, 3);
   assert.equal(h.messages.length, messageCount);
+});
+
+test('late cleanup from the previous capture cannot erase a restarted microphone or socket', async () => {
+  const h = harness({ deferFirstClose: true });
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'first' });
+  const stopping = h.send({ type: 'STOP_OFFSCREEN' });
+  await new Promise(resolve => setImmediate(resolve));
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'second' });
+  const activeMicrophone = h.acquiredMicrophones.at(-1);
+  const activeSocket = h.sockets.at(-1);
+  h.resolveFirstClose();
+  await stopping;
+  assert.equal(activeMicrophone.getTracks()[0].readyState, 'live');
+  assert.equal(activeSocket.readyState, 1);
+  assert.equal((await h.send({ type: 'GET_OFFSCREEN_STATUS' })).active, true);
+  h.window();
+  assert.equal(activeSocket.sent.length, 1);
+  await h.send({ type: 'STOP_OFFSCREEN' });
+  assert.equal(activeMicrophone.getTracks()[0].readyState, 'ended');
+});
+
+test('a late recorder stop event cannot cancel the next capture recording window', async () => {
+  const h = harness({ deferFirstRecorderStop: true });
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'first' });
+  const stopping = h.send({ type: 'STOP_OFFSCREEN' });
+  await new Promise(resolve => setImmediate(resolve));
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'second' });
+  h.recorders[0].finishStop();
+  await stopping;
+  h.window();
+  assert.equal(h.sockets[1].sent.length, 1);
+  assert.equal(h.recorders[1].state, 'recording');
+  await h.send({ type: 'STOP_OFFSCREEN' });
+});
+
+test('repeated capture sessions release each input while preserving the next session', async () => {
+  const h = harness();
+  for (let i = 0; i < 8; i++) {
+    assert.equal((await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: `session-${i}` })).ok, true);
+    assert.equal(h.acquiredMicrophones.at(-1).getTracks()[0].readyState, 'live');
+    h.window();
+    assert.equal(h.sockets.at(-1).sent.length, 1);
+    await h.send({ type: 'STOP_OFFSCREEN' });
+    assert.equal(h.acquiredMicrophones.at(-1).getTracks()[0].readyState, 'ended');
+    assert.equal(h.acquiredTabs.at(-1).getTracks()[0].readyState, 'ended');
+    assert.equal(h.intervals.size, 0);
+    assert.equal(h.timeouts.size, 0);
+  }
+  assert.equal(h.micRequests, 8);
 });
 
 

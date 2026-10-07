@@ -9,10 +9,11 @@ export default defineContentScript({
     const report = async () => {
       const status = detectMeeting();
       const meetingId = status === 'in-meeting' ? meetingIdFromUrl(window.location.href) : undefined;
-      const meetMicrophoneProblem = Array.from(document.querySelectorAll<HTMLElement>('[aria-label]'))
-        .some((element) => /microphone problem/i.test(element.getAttribute('aria-label') ?? ''));
+      // Meet has its own microphone permission and device controls. Its UI is
+      // not evidence that this extension's independently captured mic failed.
+      // Actual extension audio health is reported by the offscreen capture.
       const message: ExtensionMessage = {
-        type: 'MEETING_STATUS', status, meetingId, meetMicrophoneProblem, tabId: -1,
+        type: 'MEETING_STATUS', status, meetingId, tabId: -1,
       };
       if (ctx.isValid) {
         try {
@@ -22,7 +23,7 @@ export default defineContentScript({
           // The background will inject the current script on its next probe.
         }
       }
-      return { status, meetingId, meetMicrophoneProblem };
+      return { status, meetingId };
     };
 
     const onMessage = (message: ExtensionMessage, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void) => {
