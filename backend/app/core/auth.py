@@ -13,6 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.core.config import settings
 from app.core.user_messages import product_error
 from app.services.user_store import StoreConflict
+from app.core.observability import identify_request, log_event, error_fields
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -67,9 +68,15 @@ async def ensure_active(principal, db):
 
 async def current_user(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer)):
     if not credentials or credentials.scheme.lower() != 'bearer' or len(credentials.credentials) > 8192:
+        log_event('auth.rejected', support_code='MI-AUTH-105', reason='missing_credentials')
         raise failure()
-    principal = await verify(credentials.credentials, request.app.state.users)
-    await request.app.state.users.limit(principal.sub, 'http', 120, 60)
+    try:
+        principal = await verify(credentials.credentials, request.app.state.users)
+        identify_request(request, principal.sub)
+        await request.app.state.users.limit(principal.sub, 'http', 120, 60)
+    except HTTPException as exc:
+        log_event('auth.rejected', **error_fields(exc))
+        raise
     return principal
 
 

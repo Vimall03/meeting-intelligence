@@ -16,6 +16,10 @@ from app.services.meeting_sessions import MeetingSessions, MeetingBusy, MeetingR
 from fastapi.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.core.observability import (
+    log_event, log_context, set_log_context, new_id, error_fields, observe_operation,
+)
+from app.core.user_messages import product_error
 from app.services.event_service import EventService, MeetingEvent
 from app.services.google_drive_service import (
     GoogleDriveSearchTerms,
@@ -28,23 +32,6 @@ from app.services.meeting_timeline_service import MeetingTimelineService
 from app.services.openrouter_stt_service import transcribe_realtime_chunk
 
 router = APIRouter()
-logger = logging.getLogger("uvicorn.error")
-_LOG_COLORS = {
-    "STT": "36",
-    "CONTEXT": "34",
-    "JEV": "33",
-    "LLM": "35",
-    "DRIVE": "32",
-    "ATLASSIAN": "32",
-}
-
-
-def _log_tag(stage: str) -> str:
-    return f"\033[{_LOG_COLORS[stage]}m[MEETING][{stage}]\033[0m"
-
-
-def _format_cost(cost: float | None) -> str:
-    return f"${cost:.5f}" if cost is not None else "n/a"
 
 
 def write_audio_snapshot(audio: bytes) -> str:
@@ -82,8 +69,16 @@ async def search_atlassian(atlassian, search_terms) -> dict:
 
 @router.websocket("/ws/meeting")
 async def meeting_stream(websocket: WebSocket):
+    with log_context(request_id=new_id(), connection_id=new_id(), user_id=None,
+                     meeting_id=None, operation_id=None, job_id=None, sequence=None):
+        await _meeting_stream(websocket)
+
+
+async def _meeting_stream(websocket: WebSocket):
+    connection_started = time.perf_counter()
     registry = getattr(websocket.app.state, 'meetings', None)
     if registry and registry.draining:
+        log_event('meeting.rejected', reason='service_draining', close_code=1012, support_code='MI-CON-004')
         await websocket.close(code=1012, reason='MI-CON-004')
         return
     await websocket.accept()
@@ -99,7 +94,9 @@ async def meeting_stream(websocket: WebSocket):
         import json
         payload = json.loads(hello)
         principal = await consume_ticket(payload.get('ticket'), db)
+        set_log_context(user_id=principal.sub)
         session = MeetingSessions(db, principal, payload.get('meetingId') or secrets.token_hex(16))
+        set_log_context(meeting_id=session.session_id)
         restored = await session.acquire()
         last_ack = payload.get('lastAck', 0)
         if not isinstance(last_ack, int) or isinstance(last_ack, bool) or last_ack < 0 or last_ack > restored.get('ack', 0):
@@ -114,13 +111,35 @@ async def meeting_stream(websocket: WebSocket):
         if registry:
             registry.sockets.discard(websocket)
         code = 4409 if isinstance(exc, MeetingResumeExpired) else 4410 if isinstance(exc, MeetingBusy) else 4401 if isinstance(exc, HTTPException) and exc.status_code == 401 else 1013
-        await websocket.close(code=code, reason='MI-CON-007' if code == 4409 else 'MI-AUTH-105' if code == 4401 else 'MI-CON-004')
+        reason = 'MI-CON-007' if code == 4409 else 'MI-AUTH-105' if code == 4401 else 'MI-CON-004'
+        log_event('meeting.rejected', level=logging.WARNING, **{**error_fields(exc), 'close_code': code, 'support_code': reason})
+        await websocket.close(code=code, reason=reason)
         return
 
+    log_event('meeting.connected', resumed=bool(restored), ack=restored.get('ack', 0),
+              pending_jobs=len(restored.get('jobs', {})), duration_ms=round((time.perf_counter() - connection_started) * 1000, 2))
+    checkpoint_count = 0
+    checkpoint_total_ms = 0.0
+    checkpoint_max_ms = 0.0
+
     async def checkpoint():
-        await session.save({'ack': ack, 'audioEnd': transcribed_audio_end,
-            'transcript': transcript_text, 'context': context_state(meeting_context),
-            'events': event_state(event_service), 'timeline': timeline.snapshot(), 'jobs': jobs})
+        nonlocal checkpoint_count, checkpoint_total_ms, checkpoint_max_ms
+        started = time.perf_counter()
+        try:
+            await session.save({'ack': ack, 'audioEnd': transcribed_audio_end,
+                'transcript': transcript_text, 'context': context_state(meeting_context),
+                'events': event_state(event_service), 'timeline': timeline.snapshot(), 'jobs': jobs})
+        except Exception as exc:
+            log_event('meeting.checkpoint.failed', level=logging.WARNING,
+                      **{**error_fields(exc), 'support_code': 'MI-CON-004'})
+            raise
+        finally:
+            duration_ms = (time.perf_counter() - started) * 1000
+            checkpoint_count += 1
+            checkpoint_total_ms += duration_ms
+            checkpoint_max_ms = max(checkpoint_max_ms, duration_ms)
+            if duration_ms >= 500:
+                log_event('meeting.checkpoint.slow', duration_ms=round(duration_ms, 2), ack=ack)
 
     async def safe_send(message):
         await ensure_active(principal, db)
@@ -128,7 +147,7 @@ async def meeting_stream(websocket: WebSocket):
         await websocket.send_json(message)
 
     last_auth_check = 0.0
-    pending_audio_windows: deque[tuple[int, bytes]] = deque()
+    pending_audio_windows: deque[tuple[int, bytes, float]] = deque()
     ack = int(restored.get('ack', 0))
     received_sequence = ack
     audio_sequence = None
@@ -179,9 +198,7 @@ async def meeting_stream(websocket: WebSocket):
     drive_tasks: list[tuple[asyncio.Task[dict], float, str]] = []
     atlassian_tasks: list[tuple[asyncio.Task[dict], float, str]] = []
     if jev is None:
-        logger.warning(
-            "[MEETING][JEV] disabled reason=OPENROUTER_API_KEY_not_configured"
-        )
+        log_event('meeting.stage.disabled', level=logging.WARNING, stage='jev', reason='not_configured')
 
     async def dispatch_events(events: list[MeetingEvent]) -> None:
         entries = [(secrets.token_hex(16), event) for event in events]
@@ -190,13 +207,8 @@ async def meeting_stream(websocket: WebSocket):
                 jobs[job_id] = {'stage': 'llm', 'event': asdict(event)}
         await checkpoint()
         for job_id, event in entries:
-            logger.info(
-                "%s emitted action=%s confidence=%.2f refinement=%s",
-                _log_tag("JEV"),
-                event.type,
-                event.score,
-                event.is_refinement,
-            )
+            log_event('meeting.event', job_id=job_id, action=event.type,
+                      confidence=event.score, refinement=event.is_refinement)
             await safe_send(
                 {
                     "type": "jev_decision",
@@ -205,24 +217,21 @@ async def meeting_stream(websocket: WebSocket):
                 }
             )
             if llm is not None:
-                logger.info(
-                    "%s request action=%s refinement=%s",
-                    _log_tag("LLM"),
-                    event.type,
-                    event.is_refinement,
-                )
-                task = asyncio.create_task(llm.process_event(event))
+                task = asyncio.create_task(observe_operation('llm', llm.process_event(event),
+                    job_id=job_id, model=settings.gemma_model, action=event.type, refinement=event.is_refinement))
                 task_jobs[task] = job_id
                 llm_tasks.append((task, time.monotonic(), event))
 
     def start_search(job_id, job):
         terms = GoogleDriveSearchTerms.from_mapping(job['terms'])
         if 'google_drive' not in job.get('done', []):
-            task = asyncio.create_task(google_drive.search_relevant_files(terms, top_k=5))
+            task = asyncio.create_task(observe_operation('drive', google_drive.search_relevant_files(terms, top_k=5),
+                job_id=job_id, provider='google_drive', term_count=len(terms.weighted_terms())))
             task_jobs[task] = job_id
             drive_tasks.append((task, time.perf_counter(), job['query']))
         if 'atlassian' not in job.get('done', []):
-            task = asyncio.create_task(search_atlassian(atlassian, terms))
+            task = asyncio.create_task(observe_operation('atlassian', search_atlassian(atlassian, terms),
+                job_id=job_id, provider='atlassian', term_count=len(terms.weighted_terms())))
             task_jobs[task] = job_id
             atlassian_tasks.append((task, time.perf_counter(), job['query']))
 
@@ -237,7 +246,8 @@ async def meeting_stream(websocket: WebSocket):
     for job_id, job in list(jobs.items()):
         if job['stage'] == 'llm' and llm:
             event = MeetingEvent(**job['event'])
-            task = asyncio.create_task(llm.process_event(event))
+            task = asyncio.create_task(observe_operation('llm', llm.process_event(event),
+                job_id=job_id, model=settings.gemma_model, action=event.type, refinement=event.is_refinement))
             task_jobs[task] = job_id
             llm_tasks.append((task, time.monotonic(), event))
         elif job['stage'] == 'search':
@@ -246,6 +256,7 @@ async def meeting_stream(websocket: WebSocket):
 
     last_heartbeat = 0.0
     last_client_ping = time.monotonic()
+    close_reason = 'disconnected'
     try:
         await safe_send({'type': 'auth_ready', 'expiresAt': principal.expires,
             'expiresIn': max(0, principal.expires - int(time.time())), 'ack': ack, 'meetingId': session.session_id})
@@ -276,6 +287,7 @@ async def meeting_stream(websocket: WebSocket):
                             raise failure()
                         principal = renewed
                         session.principal = renewed
+                        log_event('meeting.auth.renewed')
                         await safe_send({'type': 'auth_ready', 'expiresAt': principal.expires,
                             'expiresIn': max(0, principal.expires - int(time.time())), 'ack': ack})
                 elif message.get('bytes'):
@@ -288,12 +300,14 @@ async def meeting_stream(websocket: WebSocket):
                         raise ValueError('Missing audio sequence')
                     if sequence > received_sequence:
                         received_sequence = sequence
-                        pending_audio_windows.append((sequence, message['bytes']))
+                        pending_audio_windows.append((sequence, message['bytes'], time.perf_counter()))
             except asyncio.TimeoutError:
                 pass
 
             now = time.monotonic()
             if sequenced and now - last_client_ping > 50:
+                close_reason = 'heartbeat_timeout'
+                log_event('meeting.heartbeat.timeout', level=logging.WARNING, close_code=1013, support_code='MI-CON-004')
                 await websocket.close(code=1013, reason='MI-CON-004')
                 break
             if now - last_heartbeat >= 5:
@@ -305,17 +319,13 @@ async def meeting_stream(websocket: WebSocket):
             if transcription_task and transcription_task.done():
                 completed_task = transcription_task
                 transcription_task = None
-                latency = now - transcription_started_at if transcription_started_at else 0.0
+                latency = time.monotonic() - transcription_started_at if transcription_started_at else 0.0
                 try:
                     transcript = completed_task.result()
                 except Exception as error:
-                    logger.error(
-                        "%s failed latency=%.2fs error=%s: %s",
-                        _log_tag("STT"),
-                        latency,
-                        type(error).__name__,
-                        error,
-                    )
+                    close_reason = 'transcription_failed'
+                    log_event('meeting.transcription.failed', level=logging.WARNING, sequence=transcription_sequence,
+                              elapsed_ms=round(latency * 1000, 2), **{**error_fields(error), 'support_code': 'MI-CON-004'})
                     # Leave this window unacknowledged; the reconnect replays it.
                     await websocket.close(code=1013, reason='MI-CON-004')
                     break
@@ -330,16 +340,11 @@ async def meeting_stream(websocket: WebSocket):
                         for segment in transcript["segments"]
                     ]
                     transcribed_audio_end += transcript["audio_duration"]
-                    logger.info(
-                        "%s window=%.1fs-%.1fs latency=%.2fs segments=%d audio_rms=%.6f audio_peak=%.6f",
-                        _log_tag("STT"),
-                        window_start,
-                        transcribed_audio_end,
-                        latency,
-                        len(new_segments),
-                        transcript.get("audio_rms", 0.0),
-                        transcript.get("audio_peak", 0.0),
-                    )
+                    log_event('meeting.transcription.accepted', sequence=transcription_sequence,
+                        audio_start_seconds=window_start, audio_end_seconds=transcribed_audio_end,
+                        audio_seconds=transcript['audio_duration'], elapsed_ms=round(latency * 1000, 2),
+                        segment_count=len(new_segments), audio_rms=transcript.get('audio_rms', 0.0),
+                        audio_peak=transcript.get('audio_peak', 0.0))
                     empty_audio_seconds = 0.0 if new_segments else empty_audio_seconds + transcript["audio_duration"]
                     if new_segments:
                         transcript_text = (transcript_text + " " + " ".join(segment["text"] for segment in new_segments)).strip()[-3000:]
@@ -354,13 +359,8 @@ async def meeting_stream(websocket: WebSocket):
                             new_text = " ".join(
                                 segment.text for segment in accepted_segments
                             )
-                            logger.info(
-                                "%s active_context accepted_segments=%d text_chars=%d\n%s",
-                                _log_tag("CONTEXT"),
-                                len(accepted_segments),
-                                len(new_text),
-                                meeting_context.as_text(),
-                            )
+                            log_event('meeting.context.updated', sequence=transcription_sequence,
+                                      segment_count=len(accepted_segments), text_chars=len(new_text))
                             await dispatch_events(
                                 event_service.enrich(
                                     new_text,
@@ -378,25 +378,23 @@ async def meeting_stream(websocket: WebSocket):
                 and pending_audio_windows
             ):
                 transcription_started_at = now
-                transcription_sequence, audio_window = pending_audio_windows.popleft()
+                transcription_sequence, audio_window, queued_at = pending_audio_windows.popleft()
                 transcription_task = asyncio.create_task(
-                    transcribe_snapshot(audio_window)
+                    observe_operation('stt', transcribe_snapshot(audio_window),
+                        sequence=transcription_sequence, model=settings.openrouter_stt_model,
+                        audio_bytes=len(audio_window), queue_depth=len(pending_audio_windows),
+                        queue_wait_ms=round((time.perf_counter() - queued_at) * 1000, 2))
                 )
 
             if jev_task and jev_task.done():
                 completed_jev_task = jev_task
                 jev_task = None
-                jev_latency = now - jev_started_at if jev_started_at else 0.0
+                jev_latency = time.monotonic() - jev_started_at if jev_started_at else 0.0
                 try:
                     decision, evaluated_snapshot = completed_jev_task.result()
                 except Exception as error:
-                    logger.error(
-                        "%s failed latency=%.2fs error=%s: %s",
-                        _log_tag("JEV"),
-                        jev_latency,
-                        type(error).__name__,
-                        error,
-                    )
+                    log_event('meeting.decision.failed', level=logging.WARNING,
+                              elapsed_ms=round(jev_latency * 1000, 2), **error_fields(error))
                 else:
                     meeting_context.complete_jev_evaluation(evaluated_snapshot, time.monotonic())
                     events = event_service.start_pending(
@@ -406,17 +404,9 @@ async def meeting_stream(websocket: WebSocket):
                         now=now,
                     )
                     await dispatch_events(events)
-                    logger.info(
-                        "%s decision latency=%.2fs search_existing=%.2f suggest_task=%.2f "
-                        "pending=%s finalized=%s cost=%s",
-                        _log_tag("JEV"),
-                        jev_latency,
-                        decision.search_existing_work_probability,
-                        decision.suggest_new_task_probability,
-                        ",".join(event_service.pending_types()) or "-",
-                        ",".join(event.type for event in events) or "-",
-                        _format_cost(decision.cost),
-                    )
+                    log_event('meeting.decision', elapsed_ms=round(jev_latency * 1000, 2),
+                              search_probability=decision.search_existing_work_probability,
+                              task_probability=decision.suggest_new_task_probability, cost_usd=decision.cost)
 
             timed_out_events = event_service.check_timeouts(
                 recent_context=meeting_context.as_text(), now=now
@@ -431,30 +421,18 @@ async def meeting_stream(websocket: WebSocket):
                     if not task.done():
                         still_running.append((task, started_at, event))
                         continue
-                    latency = now - started_at
+                    latency = time.monotonic() - started_at
                     job_id = task_jobs.pop(task)
                     try:
                         result = task.result()
                     except Exception as error:
-                        logger.error(
-                            "%s failed latency=%.2fs error=%s: %s",
-                            _log_tag("LLM"),
-                            latency,
-                            type(error).__name__,
-                            error,
-                        )
+                        log_event('meeting.action.failed', level=logging.WARNING, job_id=job_id,
+                                  elapsed_ms=round(latency * 1000, 2), **error_fields(error))
                         jobs.pop(job_id, None)
                         continue
                     jobs.pop(job_id, None)
-                    logger.info(
-                        "%s action=%s refinement=%s latency=%.2fs cost=%s data=%s",
-                        _log_tag("LLM"),
-                        result.event_type,
-                        event.is_refinement,
-                        latency,
-                        _format_cost(result.cost),
-                        result.data,
-                    )
+                    log_event('meeting.action', job_id=job_id, action=result.event_type,
+                              refinement=event.is_refinement, elapsed_ms=round(latency * 1000, 2), cost_usd=result.cost)
                     if result.event_type == "SEARCH_EXISTING_WORK":
                         search_terms = GoogleDriveSearchTerms.from_mapping(result.data)
                         weighted_terms = [
@@ -467,26 +445,9 @@ async def meeting_stream(websocket: WebSocket):
                             now=now,
                             is_topic_check=event.is_topic_check,
                         ):
-                            logger.info(
-                                "%s action suppressed action=SEARCH_EXISTING_WORK confidence=%.2f reason=%s",
-                                _log_tag("JEV"),
-                                event.score,
-                                event_service.last_search_terms_suppression_reason
-                                or "duplicate_search_topic",
-                            )
-                            logger.info(
-                                "%s skipped reason=no_new_primary_terms",
-                                _log_tag("DRIVE"),
-                            )
+                            log_event('meeting.search.skipped', job_id=job_id, confidence=event.score,
+                                      reason=event_service.last_search_terms_suppression_reason or 'duplicate_search_topic')
                         elif weighted_terms:
-                            drive_started_at = time.perf_counter()
-                            logger.info(
-                                "%s request query=%r refinement=%s terms=%s",
-                                _log_tag("DRIVE"),
-                                search_terms.query,
-                                event.is_refinement,
-                                weighted_terms,
-                            )
                             jobs[job_id] = {'stage': 'search', 'terms': result.data,
                                 'query': search_terms.query, 'done': []}
                             await checkpoint()
@@ -502,11 +463,8 @@ async def meeting_stream(websocket: WebSocket):
                             )
                             await safe_send(timeline.snapshot())
                         else:
-                            logger.warning(
-                                "%s skipped incomplete task suggestion data=%s",
-                                _log_tag("LLM"),
-                                result.data,
-                            )
+                            log_event('meeting.task.skipped', level=logging.WARNING, job_id=job_id,
+                                      reason='incomplete_suggestion')
                     await safe_send(
                         {
                             "type": "llm_result",
@@ -522,38 +480,32 @@ async def meeting_stream(websocket: WebSocket):
                     if not task.done():
                         still_running_drive.append((task, started_at, query))
                         continue
+                    job_id = task_jobs[task]
                     finish_source(task, 'google_drive')
                     total_retrieval_seconds = time.perf_counter() - started_at
                     try:
                         retrieval = task.result()
                     except Exception as error:
-                        logger.error(
-                            "%s failed latency=%.2fs error=%s: %s",
-                            _log_tag("DRIVE"),
-                            total_retrieval_seconds,
-                            type(error).__name__,
-                            error,
-                        )
+                        log_event('meeting.search.failed', level=logging.WARNING, job_id=job_id, provider='google_drive',
+                                  elapsed_ms=round(total_retrieval_seconds * 1000, 2),
+                                  **{**error_fields(error), 'support_code': 'MI-DRV-001'})
                         await safe_send(
                             {
                                 "type": "RELATED_FILES",
                                 "source": "google_drive",
                                 "query": query,
                                 "files": [],
-                                "error": str(error),
+                                "error": product_error('MI-DRV-001'),
+                                "code": 'google_drive_api_error',
+                                "support_code": 'MI-DRV-001',
                             }
                         )
                         continue
 
-                    logger.info(
-                        "%s response query=%r latency=%.2fs search=%.0fms rank=%.0fms files=%s",
-                        _log_tag("DRIVE"),
-                        retrieval["query"],
-                        total_retrieval_seconds,
-                        retrieval["search_latency_ms"],
-                        retrieval["ranking_latency_ms"],
-                        [file["name"] for file in retrieval["files"]],
-                    )
+                    log_event('meeting.search.results', job_id=job_id, provider='google_drive',
+                              elapsed_ms=round(total_retrieval_seconds * 1000, 2),
+                              search_ms=retrieval['search_latency_ms'], ranking_ms=retrieval['ranking_latency_ms'],
+                              file_count=len(retrieval['files']))
                     search_item = timeline.add_search(
                         query=retrieval["query"],
                         files=retrieval["files"],
@@ -576,12 +528,19 @@ async def meeting_stream(websocket: WebSocket):
                     if not task.done():
                         still_running_atlassian.append((task, started_at, query))
                         continue
+                    job_id = task_jobs[task]
                     finish_source(task, 'atlassian')
                     try:
                         retrieval = task.result()
                     except Exception as error:
-                        logger.error("%s failed latency=%.2fs error=%s", _log_tag("ATLASSIAN"), time.perf_counter() - started_at, error)
+                        log_event('meeting.search.failed', level=logging.WARNING, job_id=job_id, provider='atlassian',
+                                  elapsed_ms=round((time.perf_counter() - started_at) * 1000, 2),
+                                  **{**error_fields(error), 'support_code': 'MI-ATL-001'})
                         continue
+                    log_event('meeting.search.results', job_id=job_id, provider='atlassian',
+                              elapsed_ms=round((time.perf_counter() - started_at) * 1000, 2),
+                              file_count=sum(len(files) for files in retrieval['sources'].values()),
+                              source_count=len(retrieval['sources']), error_count=len(retrieval.get('errors', {})))
                     previous_revision = timeline.snapshot()["revision"]
                     for source_id, source_label in (("jira", "Jira"), ("confluence", "Confluence")):
                         files = retrieval["sources"].get(source_id, [])
@@ -596,7 +555,8 @@ async def meeting_stream(websocket: WebSocket):
                     else:
                         await checkpoint()
                     for source_id, error in retrieval.get("errors", {}).items():
-                        logger.warning("%s search source=%s query=%r error=%s", _log_tag("ATLASSIAN"), source_id, query, error)
+                        log_event('meeting.search.partial_failure', level=logging.WARNING,
+                                  job_id=job_id, provider='atlassian', source=source_id, support_code='MI-ATL-001')
                 atlassian_tasks = still_running_atlassian
 
             if (
@@ -608,34 +568,32 @@ async def meeting_stream(websocket: WebSocket):
                 if jev_snapshot is not None:
                     jev_evaluation_requested = False
                     jev_started_at = now
-                    logger.info(
-                        "%s request\n  recent context:\n%s\n  new context:\n%s",
-                        _log_tag("JEV"),
-                        jev_snapshot.recent_context or "(empty)",
-                        jev_snapshot.new_context,
-                    )
                     jev_task = asyncio.create_task(
-                        evaluate_new_context(meeting_context, jev)
+                        observe_operation('jev', evaluate_new_context(meeting_context, jev),
+                            model=settings.jev_model, sequence=ack, text_chars=len(jev_snapshot.new_context))
                     )
             # Changed work is captured before the next receive can suspend.
             # Heartbeats/outputs also checkpoint, so no per-loop extra write is needed.
     except MeetingBusy:
+        close_reason = 'lease_conflict'
+        log_event('meeting.interrupted', level=logging.WARNING, reason=close_reason, close_code=4410, support_code='MI-CON-004')
         await websocket.close(code=4410, reason='MI-CON-004')
     except HTTPException as exc:
+        close_reason = 'authorization_failed' if exc.status_code == 401 else 'request_rejected'
+        log_event('meeting.interrupted', level=logging.WARNING, reason=close_reason, **error_fields(exc))
         await websocket.close(code=4401 if exc.status_code == 401 else 1013, reason='MI-AUTH-105' if exc.status_code == 401 else 'MI-CON-004')
     except ValueError:
+        close_reason = 'invalid_control'
+        log_event('meeting.interrupted', level=logging.WARNING, reason=close_reason, close_code=4401, support_code='MI-AUTH-105')
         await websocket.close(code=4401, reason='MI-AUTH-105')
     except WebSocketDisconnect:
         if llm_tasks or drive_tasks or atlassian_tasks:
-            logger.warning(
-                "%s client disconnected pending_llm=%d pending_drive=%d pending_atlassian=%d",
-                _log_tag("LLM"),
-                len(llm_tasks),
-                len(drive_tasks),
-                len(atlassian_tasks),
-            )
+            log_event('meeting.work.pending', pending_llm=len(llm_tasks), pending_drive=len(drive_tasks),
+                      pending_atlassian=len(atlassian_tasks))
     except Exception as exc:
-        logger.warning('MI-CON-004 meeting interrupted (%s)', type(exc).__name__)
+        close_reason = 'processing_failed'
+        log_event('meeting.interrupted', level=logging.WARNING, reason=close_reason,
+                  **{**error_fields(exc), 'support_code': 'MI-CON-004'})
         with contextlib.suppress(Exception):
             await websocket.close(code=1013, reason='MI-CON-004')
     finally:
@@ -671,3 +629,7 @@ async def meeting_stream(websocket: WebSocket):
         if llm:
             await llm.close()
         await session.release()
+        log_event('meeting.disconnected', reason=close_reason, ack=ack, pending_jobs=len(jobs),
+                  duration_ms=round((time.perf_counter() - connection_started) * 1000, 2),
+                  checkpoint_count=checkpoint_count, checkpoint_total_ms=round(checkpoint_total_ms, 2),
+                  checkpoint_max_ms=round(checkpoint_max_ms, 2))

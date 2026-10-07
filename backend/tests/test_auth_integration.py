@@ -112,7 +112,7 @@ class AuthIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ticket = await auth.issue_ticket(self.b, self.db); await self.db.put('REVOKED#family-B', {'expiresAt': int(time.time()) + 86400})
         with self.assertRaises(HTTPException): await auth.consume_ticket(ticket, self.db)
     async def test_expired_and_mismatched_callback_state(self):
-        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(users=self.db)))
+        request = SimpleNamespace(state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace(users=self.db)))
         await self.db.put(auth.opaque_key('OAUTH#', 'expired'), {'expiresAt': 1, 'version': 1})
         with self.assertRaises(HTTPException): await anext(callback_session(request, 'expired', 'google_drive'))
         await self.db.put(auth.opaque_key('OAUTH#', 'other'), {'expiresAt': int(time.time()) + 600, 'version': 1, 'provider': 'atlassian'})
@@ -162,7 +162,7 @@ class AuthIntegrationTests(unittest.IsolatedAsyncioTestCase):
         original = GoogleDriveService.__init__
         def init(service, config, **kwargs):
             original(service, config, transport=httpx.MockTransport(lambda _: httpx.Response(200, json={'access_token': 'A-google', 'refresh_token': 'A-refresh', 'expires_in': 900})), **kwargs)
-        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(users=self.db)))
+        request = SimpleNamespace(state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace(users=self.db)))
         with patch.object(settings, 'google_drive_client_id', 'client'), patch.object(settings, 'google_drive_client_secret', 'secret'), patch.object(GoogleDriveService, '__init__', init):
             async with provider_session(self.db, self.a, 'google_drive') as service:
                 start = await service.authorization_url()

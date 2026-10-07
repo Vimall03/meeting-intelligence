@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
+from app.core.observability import provider_request, log_event
 
 from app.services.google_drive_service import GoogleDriveSearchTerms, GoogleDriveTokenStore
 
@@ -146,7 +147,8 @@ class AtlassianService:
         if not state_verified:
             self._verify_state(state)
         try:
-            response = await self._client.post(TOKEN_URL, json={
+            response = await provider_request(self._client, 'POST', TOKEN_URL,
+                provider='atlassian', stage='authorization', json={
                 "grant_type": "authorization_code", "client_id": self.settings.client_id,
                 "client_secret": self.settings.client_secret, "code": code,
                 "redirect_uri": self.settings.redirect_uri,
@@ -155,7 +157,8 @@ class AtlassianService:
             payload = response.json()
             access_token = payload["access_token"]
             refresh_token = payload["refresh_token"]
-            resources_response = await self._client.get(RESOURCES_URL, headers={"Authorization": f"Bearer {access_token}"})
+            resources_response = await provider_request(self._client, 'GET', RESOURCES_URL,
+                provider='atlassian', stage='site.discovery', headers={"Authorization": f"Bearer {access_token}"})
             resources_response.raise_for_status()
             resources = resources_response.json()
         except (httpx.HTTPError, ValueError, KeyError) as exc:
@@ -231,7 +234,8 @@ class AtlassianService:
             if not force_refresh and token.get("access_token") and float(token.get("expires_at", 0)) > time.time() + 60:
                 return str(token["access_token"]), token
             try:
-                response = await self._client.post(TOKEN_URL, json={
+                response = await provider_request(self._client, 'POST', TOKEN_URL,
+                    provider='atlassian', stage='token.refresh', json={
                     "grant_type": "refresh_token", "client_id": self.settings.client_id,
                     "client_secret": self.settings.client_secret,
                     "refresh_token": token["refresh_token"],
@@ -240,6 +244,7 @@ class AtlassianService:
                 raise AtlassianOAuthError("Could not refresh Atlassian access") from exc
             if response.status_code in (400, 401) and response.json().get('error') == 'invalid_grant':
                 await self.token_store.clear()
+                log_event('integration.token.invalidated', provider='atlassian', reason='invalid_grant', support_code='MI-AUTH-001')
                 raise AtlassianAuthorizationRequiredError("Atlassian access expired or was revoked. Connect again.")
             if response.is_error:
                 raise AtlassianOAuthError(f"Atlassian token refresh failed ({response.status_code})")
@@ -248,15 +253,18 @@ class AtlassianService:
                 raise AtlassianOAuthError("Atlassian token refresh returned incomplete credentials")
             updated = {**token, "access_token": payload["access_token"], "refresh_token": payload["refresh_token"], "expires_at": time.time() + int(payload.get("expires_in", 3600))}
             await self.token_store.write(updated)
+            log_event('integration.token.refreshed', provider='atlassian')
             return str(updated["access_token"]), updated
 
     async def _get_or_post(self, method: str, url: str, *, params: dict[str, Any] | None = None, json_body: dict[str, Any] | None = None, operation: str = "request") -> dict[str, Any]:
         access_token, _ = await self._access_token()
         try:
-            response = await self._client.request(method, url, params=params, json=json_body, headers={"Authorization": f"Bearer {access_token}"})
+            response = await provider_request(self._client, method, url, provider='atlassian', stage=operation, attempt=1,
+                params=params, json=json_body, headers={"Authorization": f"Bearer {access_token}"})
             if response.status_code == 401:
                 access_token, _ = await self._access_token(force_refresh=True)
-                response = await self._client.request(method, url, params=params, json=json_body, headers={"Authorization": f"Bearer {access_token}"})
+                response = await provider_request(self._client, method, url, provider='atlassian', stage=operation, attempt=2,
+                    params=params, json=json_body, headers={"Authorization": f"Bearer {access_token}"})
             if response.is_error:
                 raise AtlassianAPIError(f"Jira {operation} failed ({response.status_code}). Check your access and the project's required fields.")
             payload = response.json()
@@ -334,7 +342,7 @@ class AtlassianService:
         cloud_id = token["cloud_id"]
         site = token["site_url"]
         if source == "jira":
-            payload = await self._get_or_post("POST", f"{API_BASE}/jira/{cloud_id}/rest/api/3/search/jql", json_body={
+            payload = await self._get_or_post("POST", f"{API_BASE}/jira/{cloud_id}/rest/api/3/search/jql", operation='jira.search', json_body={
                 "jql": f"text ~ {_query_text(term)} ORDER BY updated DESC",
                 "fields": ["summary", "updated", "issuetype", "project"], "maxResults": 8,
             })
@@ -352,7 +360,7 @@ class AtlassianService:
                     "subtitle": key,
                 })
             return files
-        payload = await self._get_or_post("GET", f"{API_BASE}/confluence/{cloud_id}/wiki/rest/api/search", params={
+        payload = await self._get_or_post("GET", f"{API_BASE}/confluence/{cloud_id}/wiki/rest/api/search", operation='confluence.search', params={
             "cql": f"type = page AND text ~ {_query_text(term)}",
             "limit": 8,
         })

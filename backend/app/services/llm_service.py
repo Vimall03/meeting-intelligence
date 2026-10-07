@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 
 import httpx
+from app.core.observability import provider_request
 
 from app.services.event_service import EventType, MeetingEvent
 
@@ -128,8 +129,9 @@ class LlmService:
         ]
         total_cost: float | None = None
         for attempt in range(2):
-            response = await self._client.post(
-                self._endpoint,
+            response = await provider_request(
+                self._client, 'POST', self._endpoint,
+                provider='openrouter', stage='llm', model=self._model, attempt=attempt + 1,
                 json={
                     "model": self._model,
                     "response_format": {"type": "json_object"},

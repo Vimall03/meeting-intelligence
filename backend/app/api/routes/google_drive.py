@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
 from app.core.user_messages import product_error
+from app.core.observability import log_event, error_fields
 from app.services.integrations import google_service, google_callback
 
 from app.services.google_drive_service import (
@@ -54,6 +55,7 @@ async def oauth_callback(
     error_description: str | None = None,
 ) -> HTMLResponse:
     if error:
+        log_event('integration.connect.cancelled', provider='google_drive', support_code='MI-DRV-003')
         return _oauth_result_page(
             "Google Drive was not connected",
             product_error("MI-DRV-003"),
@@ -68,7 +70,8 @@ async def oauth_callback(
             success=True,
         )
     except GoogleDriveError as exc:
-        logging.getLogger(__name__).warning("MI-DRV-002: sign-in failed (%s)", type(exc).__name__)
+        log_event('integration.connect.failed', level=logging.WARNING, provider='google_drive',
+                  support_code='MI-DRV-002', **error_fields(exc))
         return _oauth_result_page(
             "Google Drive could not be connected",
             product_error("MI-DRV-002"),
@@ -108,7 +111,10 @@ async def get_file(file_id: str, service: Service) -> dict[str, Any]:
 
 
 def _http_error(error: GoogleDriveError) -> HTTPException:
-    logging.getLogger(__name__).warning("Drive request failed (%s)", type(error).__name__)
+    support_code = ('MI-AUTH-001' if isinstance(error, GoogleDriveAuthorizationRequiredError)
+                    else 'MI-DRV-001' if isinstance(error, GoogleDriveAPIError) else 'MI-DRV-002')
+    log_event('integration.request.failed', level=logging.WARNING, provider='google_drive',
+              support_code=support_code, **error_fields(error))
     if isinstance(error, GoogleDriveAuthorizationRequiredError):
         return HTTPException(
             status_code=401,

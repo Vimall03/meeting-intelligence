@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.services.user_store import CredentialStore, StoreConflict
 from app.services.google_drive_service import GoogleDriveService, GoogleDriveSettings
 from app.services.atlassian_service import AtlassianService, AtlassianSettings
+from app.core.observability import identify_request
 
 
 class ProviderSession:
@@ -89,6 +90,7 @@ async def callback_session(request, state, provider):
         raise failure()
     principal = Principal(row['sub'], row['family'], int(row['expiresAt']))
     await ensure_active(principal, db)
+    identify_request(request, principal.sub)
     async with provider_session(db, principal, provider) as service:
         service.callback_verified = True
         service.token_store.callback_version = int(row['connectionVersion'])

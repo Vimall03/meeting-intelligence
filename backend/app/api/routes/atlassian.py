@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.core.user_messages import product_error
+from app.core.observability import log_event, error_fields
 from app.services.integrations import atlassian_service, atlassian_callback
 
 from app.services.atlassian_service import (
@@ -41,12 +42,14 @@ async def start_auth(service: Service, force: bool = False) -> dict[str, Any]:
 @router.get("/oauth/callback", response_class=HTMLResponse)
 async def callback(service: CallbackService, code: str | None = None, state: str | None = None, error: str | None = None, error_description: str | None = None) -> HTMLResponse:
     if error:
+        log_event('integration.connect.cancelled', provider='atlassian', support_code='MI-ATL-003')
         return _result_page("Sign-in wasn’t completed", product_error("MI-ATL-003"), 400)
     try:
         await service.complete_authorization(code or "", state or "")
         return _result_page("Jira and Confluence are connected", "Related Jira issues and Confluence pages can now appear in your meeting activity. You can also review and create suggested Jira tasks.", 200)
     except AtlassianError as exc:
-        logging.getLogger(__name__).warning("MI-ATL-002: sign-in failed (%s)", type(exc).__name__)
+        log_event('integration.connect.failed', level=logging.WARNING, provider='atlassian',
+                  support_code='MI-ATL-002', **error_fields(exc))
         return _result_page("We couldn’t connect Jira and Confluence", product_error("MI-ATL-002"), 400)
 
 
@@ -115,7 +118,8 @@ def _http_error(exc: AtlassianError) -> HTTPException:
     else:
         status = 500
     support_code = "MI-AUTH-001" if status == 401 else "MI-ATL-001"
-    logging.getLogger(__name__).warning("%s: integration request failed (%s)", support_code, type(exc).__name__)
+    log_event('integration.request.failed', level=logging.WARNING, provider='atlassian',
+              support_code=support_code, **error_fields(exc))
     return HTTPException(status_code=status, detail={"code": "atlassian_error", "support_code": support_code, "message": product_error(support_code)})
 
 

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import re
-import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
 from app.services.jev_service import JevDecision
+from app.core.observability import log_event
 
 EventType = Literal["SEARCH_EXISTING_WORK", "SUGGEST_NEW_TASK"]
 
@@ -53,8 +53,6 @@ _RETRIEVAL_CUE_PATTERN = re.compile(
     r"|\bsomething\s+(?:around|like|about|along)\b",
     re.IGNORECASE,
 )
-_JEV_LOG_TAG = "\033[33m[MEETING][JEV]\033[0m"
-logger = logging.getLogger("uvicorn.error")
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,12 +269,7 @@ class EventService:
             if probability < self._thresholds[event_type]:
                 continue
             if event_type in self._pending:
-                logger.info(
-                    "%s action suppressed action=%s confidence=%.2f reason=event_already_pending",
-                    _JEV_LOG_TAG,
-                    event_type,
-                    probability,
-                )
+                log_event('meeting.event.suppressed', action=event_type, confidence=probability, reason='event_already_pending')
                 continue
             is_refinement = False
             is_topic_check = False
@@ -287,20 +280,10 @@ class EventService:
             )
             if session is not None:
                 if session.refinements >= MAX_REFINEMENTS_PER_SESSION:
-                    logger.info(
-                        "%s topic check action=%s confidence=%.2f reason=refinement_limit_reached",
-                        _JEV_LOG_TAG,
-                        event_type,
-                        probability,
-                    )
+                    log_event('meeting.topic.check', action=event_type, confidence=probability, reason='refinement_limit_reached')
                     is_topic_check = True
                 elif not self._can_refine(session, now):
-                    logger.info(
-                        "%s action suppressed action=%s confidence=%.2f reason=refinement_cooldown",
-                        _JEV_LOG_TAG,
-                        event_type,
-                        probability,
-                    )
+                    log_event('meeting.event.suppressed', action=event_type, confidence=probability, reason='refinement_cooldown')
                     continue
                 else:
                     is_refinement = True

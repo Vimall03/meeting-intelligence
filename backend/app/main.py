@@ -1,4 +1,3 @@
-import logging
 from contextlib import asynccontextmanager
 from app.services.meeting_sessions import MeetingConnections
 from fastapi import FastAPI, Request, HTTPException
@@ -16,19 +15,27 @@ from app.api.routes.session import router as session_router
 from app.core.config import settings
 from app.core.user_messages import product_error
 from app.services.user_store import UserStore, StoreConflict
+from app.core.observability import configure_logging, RequestLogMiddleware, log_event, log_context, error_fields
+
+configure_logging()
 
 @asynccontextmanager
 async def lifespan(app):
     app.state.meetings = MeetingConnections()
+    log_event('service.started')
     yield
+    log_event('service.draining', active_sockets=len(app.state.meetings.sockets))
     await app.state.meetings.drain()
+    log_event('service.stopped')
 
 
 app = FastAPI(lifespan=lifespan)
 if settings.extension_origin:
     app.add_middleware(CORSMiddleware, allow_origins=[settings.extension_origin],
-        allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Authorization', 'Content-Type', 'Idempotency-Key'])
+        allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Authorization', 'Content-Type', 'Idempotency-Key'],
+        expose_headers=['X-Request-ID'])
 app.state.users = UserStore()
+app.add_middleware(RequestLogMiddleware)
 
 
 @app.exception_handler(HTTPException)
@@ -45,18 +52,14 @@ async def invalid_request(request: Request, exc):
     return JSONResponse(status_code=422, content={'detail': {'code': 'MI-AUTH-108', 'support_code': 'MI-AUTH-108', 'message': product_error('MI-AUTH-108')}})
 
 
-@app.middleware('http')
-async def private_responses(request: Request, call_next):
-    response = await call_next(request)
-    response.headers['Cache-Control'] = 'no-store'
-    return response
-
-
 @app.exception_handler(Exception)
 async def safe_failure(request: Request, exc):
-    logging.getLogger(__name__).warning('MI-AUTH-104 request failed (%s)', type(exc).__name__)
+    request_id = getattr(request.state, 'log_request_id', None)
+    with log_context(request_id=request_id, user_id=getattr(request.state, 'log_user_id', None)):
+        log_event('http.failed', level=30, **{**error_fields(exc), 'support_code': 'MI-AUTH-104'})
     return JSONResponse(status_code=503, content={'detail': {'code': 'MI-AUTH-104',
-        'support_code': 'MI-AUTH-104', 'message': product_error('MI-AUTH-104')}})
+        'support_code': 'MI-AUTH-104', 'message': product_error('MI-AUTH-104')}},
+        headers={'Cache-Control': 'no-store', **({'X-Request-ID': request_id} if request_id else {})})
 
 
 @app.exception_handler(StoreConflict)

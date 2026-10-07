@@ -242,8 +242,20 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
         def init(service, config, **kwargs): original(service, config, transport=httpx.MockTransport(drive_api), **kwargs)
         async def transcribe(audio):
             return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': 'Please send the launch plan to Maya.'}]}
-        with patch.object(route, 'provider_session', real_provider), patch.object(GoogleDriveService, '__init__', init), patch.object(route.settings, 'openrouter_api_key', 'test-key'), patch.object(route, 'JevService', FakeJev), patch.object(route, 'LlmService', FakeLlm), patch.object(route, 'transcribe_snapshot', transcribe):
+        with self.assertLogs('meeting_intelligence', level='INFO') as captured, patch.object(route, 'provider_session', real_provider), patch.object(GoogleDriveService, '__init__', init), patch.object(route.settings, 'openrouter_api_key', 'test-key'), patch.object(route, 'JevService', FakeJev), patch.object(route, 'LlmService', FakeLlm), patch.object(route, 'transcribe_snapshot', transcribe):
             await asyncio.wait_for(asyncio.gather(*(route.meeting_stream(s) for s in sockets)), timeout=5)
+        from app.core.observability import JsonFormatter
+        logs = [json.loads(JsonFormatter().format(record)) for record in captured.records]
+        for owner in ('A', 'B'):
+            own = [entry for entry in logs if entry.get('user_id') == owner]
+            self.assertEqual(len({entry['meeting_id'] for entry in own}), 1)
+            self.assertEqual(len({entry['connection_id'] for entry in own}), 1)
+            self.assertEqual(len({entry['request_id'] for entry in own}), 1)
+            self.assertTrue(any(entry['event'] == 'meeting.transcription.accepted' and entry['sequence'] == 1 for entry in own))
+            self.assertTrue(any(entry['event'] == 'meeting.search.results' and entry['provider'] == 'google_drive' for entry in own))
+        self.assertEqual(len({entry['connection_id'] for entry in logs}), 2)
+        for secret in ('-secret', '-refresh', 'launch plan', '-private', 'Maya'):
+            self.assertNotIn(secret, json.dumps(logs))
         latest = [[m for m in s.sent if m['type'] == 'timeline_snapshot'][-1] for s in sockets]
         self.assertNotEqual(latest[0]['session_id'], latest[1]['session_id'])
         for owner, other, snapshot in [('A', 'B', latest[0]), ('B', 'A', latest[1])]:

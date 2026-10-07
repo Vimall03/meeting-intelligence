@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import httpx
+from app.core.observability import provider_request
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,8 +33,9 @@ class JevService:
     async def decide(
         self, recent_context: str, new_context: str
     ) -> JevDecision:
-        response = await self._client.post(
-            self._endpoint,
+        response = await provider_request(
+            self._client, 'POST', self._endpoint,
+            provider='openrouter', stage='jev', model=self._model,
             json={
                 "model": self._model,
                 "state": {

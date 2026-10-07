@@ -116,9 +116,14 @@ class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
             return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': audio.decode()}]}
         first = RecoverySocket(self.db, window(1, 'first words'), end_ack=1)
         second = RecoverySocket(self.db, window(1, 'first words') + window(2, 'second words'), end_ack=2)
-        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''), patch.object(route, 'transcribe_snapshot', transcribe):
+        with self.assertLogs('meeting_intelligence', level='INFO') as captured, patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''), patch.object(route, 'transcribe_snapshot', transcribe):
             await asyncio.wait_for(route.meeting_stream(first), 3)
             await asyncio.wait_for(route.meeting_stream(second), 3)
+        connected = [record.metadata for record in captured.records if record.getMessage() == 'meeting.connected']
+        self.assertEqual([entry['resumed'] for entry in connected], [False, True])
+        self.assertEqual({entry['meeting_id'] for entry in connected}, {'meeting-1'})
+        self.assertEqual({entry['user_id'] for entry in connected}, {'A'})
+        self.assertEqual(len({entry['connection_id'] for entry in connected}), 2)
         self.assertEqual(calls, [b'first words', b'second words'])
         self.assertEqual(next(m for m in second.sent if m['type'] == 'auth_ready')['ack'], 1)
         one = next(m for m in first.sent if m['type'] == 'timeline_snapshot')

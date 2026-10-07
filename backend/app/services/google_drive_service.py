@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+from app.core.observability import provider_request, log_event
 
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -252,8 +253,8 @@ class GoogleDriveService:
             raise GoogleDriveOAuthError("Google did not return an authorization code and state")
         if not state_verified:
             self._verify_state(state)
-        response = await self._client.post(
-            GOOGLE_TOKEN_URL,
+        response = await provider_request(
+            self._client, 'POST', GOOGLE_TOKEN_URL, provider='google_drive', stage='authorization',
             data={
                 "code": code,
                 "client_id": self.settings.client_id,
@@ -281,8 +282,8 @@ class GoogleDriveService:
         token = await self.token_store.read()
         if token and token.get("access_token"):
             try:
-                await self._client.post(
-                    "https://oauth2.googleapis.com/revoke",
+                await provider_request(
+                    self._client, 'POST', "https://oauth2.googleapis.com/revoke", provider='google_drive', stage='disconnect',
                     params={"token": token["access_token"]},
                 )
             except httpx.HTTPError:
@@ -398,15 +399,15 @@ class GoogleDriveService:
     ) -> dict[str, Any]:
         access_token = await self._access_token()
         url = GOOGLE_DRIVE_FILES_URL if file_id is None else f"{GOOGLE_DRIVE_FILES_URL}/{file_id}"
-        response = await self._client.get(
-            url,
+        response = await provider_request(
+            self._client, 'GET', url, provider='google_drive', stage='file.read' if file_id else 'search', attempt=1,
             params=params,
             headers={"Authorization": f"Bearer {access_token}"},
         )
         if response.status_code == 401:
             access_token = await self._access_token(force_refresh=True)
-            response = await self._client.get(
-                url,
+            response = await provider_request(
+                self._client, 'GET', url, provider='google_drive', stage='file.read' if file_id else 'search', attempt=2,
                 params=params,
                 headers={"Authorization": f"Bearer {access_token}"},
             )
@@ -446,8 +447,8 @@ class GoogleDriveService:
                 and expires_at > time.time() + TOKEN_REFRESH_SKEW_SECONDS
             ):
                 return str(token["access_token"])
-            response = await self._client.post(
-                GOOGLE_TOKEN_URL,
+            response = await provider_request(
+                self._client, 'POST', GOOGLE_TOKEN_URL, provider='google_drive', stage='token.refresh',
                 data={
                     "client_id": self.settings.client_id,
                     "client_secret": self.settings.client_secret,
@@ -458,6 +459,7 @@ class GoogleDriveService:
             if response.is_error:
                 if response.status_code in (400, 401) and response.json().get('error') == 'invalid_grant':
                     await self.token_store.clear()
+                    log_event('integration.token.invalidated', provider='google_drive', reason='invalid_grant', support_code='MI-AUTH-001')
                     raise GoogleDriveAuthorizationRequiredError(
                         "Google Drive authorization expired or was revoked"
                     )
@@ -466,6 +468,7 @@ class GoogleDriveService:
                 response.json(), refresh_token=str(token["refresh_token"])
             )
             await self.token_store.write(refreshed)
+            log_event('integration.token.refreshed', provider='google_drive')
             return str(refreshed["access_token"])
 
 

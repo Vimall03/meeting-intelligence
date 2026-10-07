@@ -7,6 +7,7 @@ import numpy as np
 from app.services.audio_decode import SAMPLE_RATE, load_audio
 
 from app.core.config import settings
+from app.core.observability import observe
 
 
 class OpenRouterTranscriptionService:
@@ -23,7 +24,8 @@ class OpenRouterTranscriptionService:
         self.transport = transport
 
     def transcribe(self, file_path: str, start_seconds: float = 0.0) -> dict:
-        audio = load_audio(file_path)
+        with observe('audio.decode', stage='stt'):
+            audio = load_audio(file_path)
         audio_duration = len(audio) / SAMPLE_RATE
         chunk_start = min(max(start_seconds, 0.0), audio_duration)
         if not len(audio) or chunk_start >= audio_duration:
@@ -43,18 +45,19 @@ class OpenRouterTranscriptionService:
             timeout=60.0,
             transport=self.transport,
         ) as client:
-            response = client.post(
-                self.endpoint,
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-            )
-            if not response.is_success:
-                raise httpx.HTTPStatusError(
-                    f"OpenRouter transcription failed ({response.status_code}): "
-                    f"{response.text}",
-                    request=response.request,
-                    response=response,
+            with observe('provider.request', provider='openrouter', stage='stt', model=self.model) as metrics:
+                response = client.post(
+                    self.endpoint,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=payload,
                 )
+                metrics['status_code'] = response.status_code
+                if not response.is_success:
+                    raise httpx.HTTPStatusError(
+                        f"OpenRouter transcription failed ({response.status_code})",
+                        request=response.request,
+                        response=response,
+                    )
 
         result = response.json()
         segments = [
