@@ -1,9 +1,10 @@
 import { AuthGate } from './AuthGate';
 import { PolicyLinks } from './PolicyLinks';
+import { UiIcon } from './UiIcon';
 import { closeSidePanel } from '../../lib/side-panel';
 import { authenticatedFetch as fetch } from '../../lib/http';
 import { problem, userError, httpProblem, microphoneProblem } from '../../lib/user-messages';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { ExtensionMessage, ExtensionState, MeetingStatus, TaskSuggestionItem } from '../../lib/types';
 import { isTimelineForMeeting, meetingIdFromUrl } from '../../lib/meeting-session';
 import { visibleTimelineItems } from '../../lib/timeline';
@@ -210,7 +211,7 @@ async function readMicrophonePermission(): Promise<PermissionState | undefined> 
   }
 }
 
-function MeetingApp({ userId }: { userId: string }) {
+function MeetingApp({ userId, accountControls, accountNotice }: { userId: string; accountControls: ReactNode; accountNotice: ReactNode }) {
   const extensionVersion = chrome.runtime.getManifest().version;
   const [state, setState] = useState(initialState);
   const [activeTab, setActiveTab] = useState<chrome.tabs.Tab>();
@@ -241,6 +242,7 @@ function MeetingApp({ userId }: { userId: string }) {
   const previousTimelineLayout = useRef<{ firstId?: string; height: number }>({ height: 0 });
 
   useLayoutEffect(() => {
+    if (settingsOpen) return;
     const scroll = timelineScrollRef.current;
     if (!scroll) return;
     const firstId = state.timeline?.items[0]?.id;
@@ -249,7 +251,7 @@ function MeetingApp({ userId }: { userId: string }) {
       scroll.scrollTop += scroll.scrollHeight - previous.height;
     }
     previousTimelineLayout.current = { firstId, height: scroll.scrollHeight };
-  }, [state.timeline?.session_id, state.timeline?.revision]);
+  }, [state.timeline?.session_id, state.timeline?.revision, settingsOpen]);
 
   const refresh = useCallback(async () => {
     const sequence = ++refreshSequence.current;
@@ -665,7 +667,9 @@ function MeetingApp({ userId }: { userId: string }) {
   const statusTitle = capturingHere
     ? state.captureStatus === 'connecting' ? 'Getting ready to listen' : 'Listening to your meeting'
     : capturingElsewhere ? 'Listening in another tab'
-      : inMeeting ? 'Ready to listen'
+      : inMeeting ? microphone === 'checking' ? 'Checking microphone access'
+        : microphone !== 'granted' ? 'Set up your microphone'
+          : readyTabId !== activeTab?.id ? 'Preparing to listen' : 'Ready to listen'
         : state.meetingStatus === 'unknown' && isMeetTab(activeTab) ? 'Connect this Meet tab'
           : 'Ready when you are';
   const timelineItems = isTimelineForMeeting(
@@ -682,31 +686,23 @@ function MeetingApp({ userId }: { userId: string }) {
   return (
     <main className="shell">
       <header className="header">
-        <img className="brand-mark" src="/meeting-intelligence-logo.png" alt="" aria-hidden="true" />
-        <div className="brand-copy"><h1>Meeting Intelligence</h1><p>Context for your online meetings</p></div>
-        <span className={`live-indicator ${running ? 'is-live' : ''}`} aria-label={running ? 'Listening' : 'Not listening'} />
+        <img className="brand-mark" src="/meeting-intelligence-icon-128.png" alt="" aria-hidden="true" />
+        <div className="brand-copy"><h1>Meeting Intelligence</h1><p>Your meeting assistant</p></div>
+        <div className="header-actions">
         <button
-            className="settings-button"
+            className="settings-button icon-button"
             type="button"
-            aria-label={settingsOpen ? 'Hide settings' : 'Show settings'}
+            aria-label={settingsOpen ? 'Back to meeting' : 'Open settings'}
             aria-controls="capture-settings"
             aria-expanded={settingsOpen}
-            title={settingsOpen ? 'Hide settings' : 'Settings'}
+            title={settingsOpen ? 'Back to meeting' : 'Settings'}
             onClick={() => setSettingsOpen((open) => !open)}
-          >⚙</button>
-        <button className="panel-close" onClick={() => void closePanel()} aria-label="Close Meeting Intelligence panel" title="Close panel">×</button>
+          ><UiIcon name={settingsOpen ? 'back' : 'settings'} /></button>
+        <button className="panel-close icon-button" onClick={() => void closePanel()} aria-label="Close Meeting Intelligence panel" title="Close panel"><UiIcon name="close" /></button>
+        </div>
       </header>
 
-      <section className={`meeting-card ${running ? 'is-active' : inMeeting ? 'is-ready' : ''}`} aria-live="polite">
-        <div className="status-icon" aria-hidden="true">{running ? '●' : inMeeting ? '✓' : '•'}</div>
-        <div className="status-copy">
-          <strong>{statusTitle}</strong>
-          <span>{running
-            ? state.backendConnected ? 'Finding useful context and next steps' : 'Connecting…'
-            : inMeeting ? 'Listen to the call and your microphone' : isMeetTab(activeTab) ? 'Join the call to start listening' : 'Live listening currently supports Google Meet. More platforms are planned.'}</span>
-        </div>
-      </section>
-
+      {accountNotice}
       {capturingElsewhere && <p className="context-note">You’re listening to a meeting in another tab. Stop it here to switch meetings.</p>}
       {state.captureStatus === 'error' && state.error
         ? <div className="notice error" role="alert">{userError(state.error, 'MI-CAP-004')}</div>
@@ -722,6 +718,17 @@ function MeetingApp({ userId }: { userId: string }) {
         </div>
       )}
 
+      <div className={`capture-controls ${settingsOpen ? 'is-settings' : ''}`} hidden={settingsOpen && !running}>
+      <section className={`meeting-card ${running ? 'is-active' : inMeeting ? 'is-ready' : ''}`} aria-live="polite">
+        <div className="status-icon" aria-hidden="true">{running ? '●' : inMeeting && microphone === 'granted' && readyTabId === activeTab?.id ? '✓' : '•'}</div>
+        <div className="status-copy">
+          <strong>{statusTitle}</strong>
+          <span>{running
+            ? state.backendConnected ? 'Finding useful context and next steps' : 'Connecting…'
+            : inMeeting ? 'Listen to the call and your microphone' : isMeetTab(activeTab) ? 'Join the call to start listening' : 'Live listening currently supports Google Meet. More platforms are planned.'}</span>
+        </div>
+      </section>
+
       {running && (
         <div className="actions">
           <button className="stop-button" onClick={stopCapture} disabled={busy}>
@@ -734,27 +741,36 @@ function MeetingApp({ userId }: { userId: string }) {
           <button className="start-button" onClick={startCapture} disabled={busy || !inMeeting || microphone !== 'granted' || readyTabId !== activeTab?.id}>
             {busy ? 'Starting…' : readyTabId !== activeTab?.id && inMeeting && microphone === 'granted' ? 'Preparing…' : state.captureStatus === 'error' ? 'Try listening again' : 'Start listening'}
           </button>
-        <p className="action-hint">{!inMeeting ? 'Join a Google Meet call to start listening.' : microphone === 'checking' ? 'Checking microphone access…' : microphone !== 'granted' ? 'Enable your microphone to include your voice.' : 'You control when listening starts and stops.'}</p>
+        {(!inMeeting || microphone === 'checking' || microphone === 'granted') && <p className="action-hint">{!inMeeting ? 'Join a Google Meet call to start listening.' : microphone === 'checking' ? 'Checking microphone access…' : 'You control when listening starts and stops.'}</p>}
       </div>}
+      </div>
 
+      {/* Keep activity mounted so moving between views preserves task drafts and created-task links. */}
+      <div className="meeting-view" hidden={settingsOpen}>
+      {!running && microphone !== 'granted' && microphone !== 'checking' && <section className="microphone-setup">
+        <div><h2>Include your voice</h2><p>Allow microphone access before you start listening.</p></div>
+        <button className="permission-button" onClick={requestMicrophone} disabled={busy || microphone === 'requesting'}>
+          {microphone === 'requesting' ? 'Waiting for permission…' : microphone === 'denied' ? 'Retry microphone access' : 'Enable microphone'}
+        </button>
+      </section>}
       <section className="timeline-section" aria-labelledby="timeline-heading">
         <div className="timeline-heading">
           <div>
-            <h2 id="timeline-heading">Meeting activity</h2>
-            <p>Relevant files and next steps</p>
+            <h2 id="timeline-heading">Activity</h2>
+            <p>Related work and next steps</p>
           </div>
           <span className="timeline-count">{timelineItems.length}</span>
         </div>
         <div className="timeline-scroll" ref={timelineScrollRef}>
           {timelineItems.length === 0 ? (
-            <div className="timeline-empty"><span className="empty-symbol" aria-hidden="true">✦</span><strong>{running ? "Listening for useful context" : "A little context goes a long way"}</strong><p>{running ? "Related files and suggested tasks appear here as your meeting unfolds." : "Start listening in a Meet call to find related files and turn next steps into tasks."}</p></div>
+            <div className="timeline-empty"><span className="empty-symbol" aria-hidden="true">✦</span><strong>{running ? 'Listening for context' : 'Your meeting activity appears here'}</strong><p>{running ? 'Related files and suggested tasks will appear as you talk.' : 'Start listening in Google Meet to find related work and follow-ups.'}</p></div>
           ) : (
             <ol className="timeline-list">
               {timelineItems.map((item) => (
                 <li className={`timeline-entry ${item.kind === 'task_suggestion' ? 'is-task' : 'is-search'}`} key={item.id}>
                   <article className="timeline-card">
                     <div className="timeline-meta">
-                      <span>{item.kind === 'task_suggestion' ? 'Task suggestion' : 'Search results'}</span>
+                      {item.kind === 'task_suggestion' ? <span>Suggested task</span> : <span className="timeline-source"><span className="timeline-source-icon" aria-hidden="true">{item.source.label.charAt(0)}</span>{item.source.label}</span>}
                       <time dateTime={item.created_at}>{timelineTime(item.created_at)}</time>
                     </div>
                     {item.kind === 'task_suggestion' ? (
@@ -765,7 +781,6 @@ function MeetingApp({ userId }: { userId: string }) {
                       </>
                     ) : (
                       <>
-                        <div className="timeline-source"><span className="timeline-source-icon" aria-hidden="true">{item.source.label.charAt(0)}</span>{item.source.label}</div>
                         <h3>{item.query || 'Related files'}</h3>
                         {item.files.length > 0 && (
                           <ul className="timeline-files">
@@ -775,7 +790,7 @@ function MeetingApp({ userId }: { userId: string }) {
                                   <strong title={file.name}>{file.name}</strong>
                                   <span>{file.subtitle ? `${file.subtitle} · ` : ''}{driveFileType(file.mime_type)}</span>
                                 </div>
-                                {searchResultUrl(file, item.source.id) && <a href={searchResultUrl(file, item.source.id)} target="_blank" rel="noreferrer">Open</a>}
+                                {searchResultUrl(file, item.source.id) && <a href={searchResultUrl(file, item.source.id)} target="_blank" rel="noreferrer" aria-label={`Open ${file.name}`}>Open ↗</a>}
                               </li>
                             ))}
                           </ul>
@@ -789,25 +804,27 @@ function MeetingApp({ userId }: { userId: string }) {
           )}
         </div>
       </section>
+      </div>
 
-      {(settingsOpen || (!running && microphone !== 'granted' && microphone !== 'checking')) && <div id="capture-settings" className="settings-panel">
-      <h2 className="settings-heading">Connections & audio</h2>
+      <div id="capture-settings" className="settings-view settings-panel" hidden={!settingsOpen}>
+      <div className="view-heading"><h2>Settings</h2><p>Manage connections, audio and your account.</p></div>
+      <div className="settings-group"><h3 className="settings-heading">Connected accounts</h3>
       <section className="section-card drive-card" aria-live="polite">
         <div className="drive-card-topline">
           <div className="section-heading">
             <span className={`drive-icon ${googleDriveConnection === 'connected' ? 'enabled' : ''}`} aria-hidden="true">G</span>
             <div>
-              <h2>Google Drive</h2>
+              <h4>Google Drive</h4>
               <p>{googleDriveConnection === 'connected'
-                ? 'Find related files during your meetings'
+                ? 'Read-only document search'
                 : googleDriveAuthorizing ? 'Finish sign-in in the Google tab'
                   : googleDriveConnection === 'checking' ? 'Checking connection…'
-                    : 'Connect to find related files during your meetings'}</p>
+                    : 'Find related documents'}</p>
             </div>
           </div>
           {googleDriveConnection === 'connected' && <span className="drive-connected-badge">Connected</span>}
         </div>
-        {googleDriveConnection === 'connected' && <button className="drive-connect-button" disabled={googleDriveBusy} onClick={() => {
+        {googleDriveConnection === 'connected' && <button className="drive-connect-button is-secondary" disabled={googleDriveBusy} onClick={() => {
           setGoogleDriveBusy(true);
           void fetch(`${GOOGLE_DRIVE_STATUS_URL.replace(/\/status$/, '')}/disconnect`, { method: 'POST', body: '{}' })
             .then(async response => { if (!response.ok) throw new Error(problem('MI-DRV-001')); await syncGoogleDriveStatus(); })
@@ -833,13 +850,13 @@ function MeetingApp({ userId }: { userId: string }) {
           <div className="section-heading">
             <span className={`drive-icon ${atlassianConnection === 'connected' ? 'enabled' : ''}`} aria-hidden="true">A</span>
             <div>
-              <h2>Jira & Confluence</h2>
+              <h4>Jira & Confluence</h4>
               <p>{atlassianConnection === 'connected'
                 ? `Searching ${atlassianSources.includes('jira') && atlassianSources.includes('confluence') ? 'Jira and Confluence' : atlassianSources.includes('jira') ? 'Jira' : 'Confluence'}${atlassianSite ? ` · ${new URL(atlassianSite).hostname}` : ''}`
                 : atlassianAuthorizing ? 'Finish in the sign-in tab'
                   : atlassianConnection === 'checking' ? 'Checking connection…'
-                    : atlassianConnection === 'error' ? 'We couldn’t check your connection'
-                    : atlassianConfigured ? 'Connect to find issues and pages mentioned in meetings'
+                    : atlassianConnection === 'error' ? 'Find issues and pages'
+                    : atlassianConfigured ? 'Find issues and pages; create reviewed tasks'
                       : problem('MI-ATL-004')}</p>
             </div>
           </div>
@@ -854,7 +871,7 @@ function MeetingApp({ userId }: { userId: string }) {
                 .catch(cause => setAtlassianError(userError(cause, 'MI-ATL-001'))).finally(() => setAtlassianBusy(false));
             }}>{sites.map(site => <option key={site.id} value={site.id}>{site.name}</option>)}</select>
           </label>}
-          <button className="drive-connect-button" disabled={atlassianBusy} onClick={() => {
+          <button className="drive-connect-button is-secondary" disabled={atlassianBusy} onClick={() => {
             setAtlassianBusy(true);
             void fetch(`${ATLASSIAN_STATUS_URL.replace(/\/status$/, '')}/disconnect`, { method: 'POST', body: '{}' })
               .then(async response => { if (!response.ok) throw new Error(problem('MI-ATL-001')); await syncAtlassianStatus(); })
@@ -869,18 +886,20 @@ function MeetingApp({ userId }: { userId: string }) {
           </button>
         )}
       </section>
+      </div>
 
+      <div className="settings-group"><h3 className="settings-heading">Audio</h3>
       <section className="section-card">
         <div className="section-heading">
           <span className={`mic-icon ${microphone === 'granted' ? 'enabled' : ''}`} aria-hidden="true">{microphone === 'granted' ? '✓' : '♪'}</span>
-          <div><h2>Microphone</h2><p>{microphone === 'granted' ? 'Access is enabled' : microphone === 'denied' ? 'Permission needs attention' : 'Needed to include your voice'}</p></div>
+          <div><h4>Microphone</h4><p>{microphone === 'granted' ? 'Access is enabled' : microphone === 'denied' ? 'Permission needs attention' : 'Needed to include your voice'}</p></div>
         </div>
         {microphone === 'denied' && (
-          <div className="permission-help" role="note">
-            <strong>Allow microphone access</strong>
-            <p>Select Enable microphone and allow access in your browser. If the request doesn’t appear, check <code>brave://extensions</code> → Meeting Intelligence → Details → Site settings → Microphone.</p>
+          <details className="permission-help">
+            <summary>How to allow microphone access</summary>
+            <p>Select Retry microphone access and allow access in your browser. If the request doesn’t appear, open your browser’s extensions settings → Meeting Intelligence → Details → Site settings → Microphone.</p>
             <p>After you allow access, the request tab closes and this panel updates automatically.</p>
-          </div>
+          </details>
         )}
         {microphone !== 'granted' && microphone !== 'checking' && (
           <button className="permission-button" onClick={requestMicrophone} disabled={busy || microphone === 'requesting'}>
@@ -889,13 +908,15 @@ function MeetingApp({ userId }: { userId: string }) {
         )}
         <p className="privacy-note">Listening continues when you close this panel. Select Stop listening to end it. Your audio is transcribed to find relevant content.</p>
       </section>
-      </div>}
+      </div>
+      <div className="settings-group settings-account"><h3 className="settings-heading">Your account</h3>{accountControls}</div>
+      </div>
 
 
       <footer className="footer">
         <div className="footer-status">
           <span title={`Version ${extensionVersion}`}>{activeTab?.title ? activeTab.title.length > 42 ? `${activeTab.title.slice(0, 39)}…` : activeTab.title : 'Active browser tab'}</span>
-          <button className="refresh-button" onClick={() => void refresh()} aria-label="Check connection" title="Check connection">↻</button>
+          <button className="refresh-button" onClick={() => void refresh()} aria-label="Check connection" title="Check connection"><UiIcon name="refresh" /></button>
         </div>
         <PolicyLinks />
       </footer>
@@ -904,5 +925,5 @@ function MeetingApp({ userId }: { userId: string }) {
 }
 
 export default function App() {
-  return <AuthGate>{session => <MeetingApp key={session.userId} userId={session.userId!} />}</AuthGate>;
+  return <AuthGate>{(session, accountControls, accountNotice) => <MeetingApp key={session.userId} userId={session.userId!} accountControls={accountControls} accountNotice={accountNotice} />}</AuthGate>;
 }

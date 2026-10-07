@@ -3,9 +3,10 @@ import type { PublicSession } from '../../lib/auth-session';
 import { problem, userError } from '../../lib/user-messages';
 import { closeSidePanel } from '../../lib/side-panel';
 import { PolicyLinks } from './PolicyLinks';
+import { UiIcon } from './UiIcon';
 import './style.css';
 
-export function AuthGate({ children }: { children: (session: PublicSession) => ReactNode }) {
+export function AuthGate({ children }: { children: (session: PublicSession, accountControls: ReactNode, accountNotice: ReactNode) => ReactNode }) {
   const [session, setSession] = useState<PublicSession>();
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
@@ -39,25 +40,25 @@ export function AuthGate({ children }: { children: (session: PublicSession) => R
     } catch (cause) { setError(userError(cause, 'MI-AUTH-104')); }
     finally { setBusy(false); if (type === 'AUTH_LOGOUT') await sync(); }
   };
-  if (session?.signedIn) return <>
-    <div className="account-bar"><span title={session.email}>{session.email}</span><button disabled={busy} onClick={() => void action('AUTH_LOGOUT')}>Sign out</button></div>
-    {error && <p className="auth-error" role="alert">{error}</p>}
-    {children(session)}
-  </>;
+  if (session?.signedIn) return children(
+    session,
+    <div className="account-settings"><span title={session.email}>{session.email}</span><button disabled={busy} onClick={() => void action('AUTH_LOGOUT')}>Sign out</button></div>,
+    error && <div className="notice error" role="alert">{userError(error, 'MI-AUTH-104')}</div>,
+  );
   const remaining = Math.max(0, Math.ceil((resendAt - now) / 1000));
   return <main className="auth-card">
     <div className="auth-card-header">
       <img src="/meeting-intelligence-icon-128.png" alt="" width="48" height="48" />
-      <button type="button" className="panel-close" aria-label="Close Meeting Intelligence panel" title="Close panel" onClick={() => void closeSidePanel().catch(cause => setError(userError(cause, 'MI-APP-003')))}>×</button>
+      <button type="button" className="panel-close" aria-label="Close Meeting Intelligence panel" title="Close panel" onClick={() => void closeSidePanel().catch(cause => setError(userError(cause, 'MI-APP-003')))}><UiIcon name="close" /></button>
     </div>
-    <h1>Meeting Intelligence</h1><p>Sign in to find useful context and follow-ups during your meetings.</p>
+    <h1>Welcome to<br/>Meeting Intelligence</h1><p>Find relevant work and follow-ups during your meetings.</p>
     <form onSubmit={event => { event.preventDefault(); void action(sent ? 'AUTH_VERIFY' : 'AUTH_REQUEST'); }}>
       <label>Email<input type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} disabled={busy || sent} required maxLength={254} /></label>
       {sent && <><p>Check your inbox for your six-digit sign-in code.</p><label>Sign-in code<input autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={code} onChange={event => setCode(event.target.value.replace(/\D/g, ''))} disabled={busy} required /></label></>}
       <button className="auth-primary" disabled={busy || !session}>{busy ? 'Please wait…' : sent ? 'Sign in' : 'Send sign-in code'}</button>
     </form>
     {sent && <div className="auth-links"><button disabled={busy || remaining > 0} onClick={() => void action('AUTH_REQUEST')}>{remaining ? `Resend in ${remaining}s` : 'Send a new code'}</button><button disabled={busy} onClick={() => { setSent(false); setCode(''); }}>Change email</button></div>}
-    {error && <p className="auth-error" role="alert">{error}</p>}
+    {error && <p className="auth-error" role="alert">{userError(error, 'MI-AUTH-104')}</p>}
     <p className="auth-hint">Live listening currently supports Google Meet.</p>
     <PolicyLinks />
   </main>;
