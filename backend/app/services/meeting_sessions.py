@@ -4,6 +4,7 @@ import json
 import re
 import secrets
 import time
+import hashlib
 from dataclasses import asdict
 
 from app.core.auth import ensure_active
@@ -16,6 +17,34 @@ class MeetingBusy(Exception):
 
 class MeetingResumeExpired(Exception):
     pass
+
+
+class MeetingCheckpoints:
+    """Skip identical writes while renewing the fenced lease well before expiry.
+
+    Changed state is still durable before any acknowledgement or result is sent.
+    This object belongs to one authenticated socket, never a shared user cache.
+    """
+    def __init__(self, session, *, clock=time.monotonic):
+        self.session, self.clock = session, clock
+        self.saved_digest = None
+        self.saved_at = 0.0
+
+    @staticmethod
+    def digest(state):
+        events = {k: v for k, v in state.get('events', {}).items() if k != 'offset'}
+        # Wall/monotonic conversion jitter isn't a meeting-state change.
+        stable = {**state, 'events': events}
+        return hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).digest()
+
+    async def save(self, state):
+        digest = self.digest(state)
+        if digest == self.saved_digest and self.clock() - self.saved_at < 5:
+            return False
+        await self.session.save(state)
+        # save may trim an oversized timeline; compare the persisted state.
+        self.saved_digest, self.saved_at = self.digest(state), self.clock()
+        return True
 
 
 class MeetingSessions:

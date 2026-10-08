@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from fastapi import WebSocketDisconnect
 from app.core.auth import Principal, issue_ticket
-from app.services.meeting_sessions import MeetingSessions, MeetingBusy, MeetingConnections
+from app.services.meeting_sessions import MeetingSessions, MeetingCheckpoints, MeetingBusy, MeetingConnections
 from app.services.meeting_sessions import context_state, restore_context, event_state, restore_events
 from app.services.meeting_context_service import MeetingContextService
 from app.services.event_service import EventService
@@ -77,6 +77,56 @@ class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(MeetingBusy): await first.save(self.state)
         await first.release()
         self.assertEqual(self.db.rows[first.key]['owner'], second.owner)
+
+    async def test_unchanged_checkpoint_coalesces_but_changed_ack_and_lease_renewal_are_durable(self):
+        now = [10.0]
+        session = MeetingSessions(self.db, self.a, 'coalesced')
+        await session.acquire()
+        checkpoints = MeetingCheckpoints(session, clock=lambda: now[0])
+        self.assertTrue(await checkpoints.save(self.state))
+        version = session.version
+        self.state['events'] = {'offset': 123.000001}
+        self.assertFalse(await checkpoints.save(self.state))
+        self.assertEqual(session.version, version)
+        self.state['ack'] = 2
+        self.assertTrue(await checkpoints.save(self.state))
+        now[0] += 5
+        self.assertTrue(await checkpoints.save(self.state))
+        saved = await self.db.decrypt('A', 'meeting-state', self.db.rows[session.key]['cipher'])
+        self.assertEqual(saved['ack'], 2)
+        self.assertEqual(session.version, version + 2)
+
+    async def test_coalesced_checkpoints_still_fence_expired_owner_and_do_not_hide_failures(self):
+        now = [10.0]
+        first = MeetingSessions(self.db, self.a, 'coalesced')
+        await first.acquire()
+        checkpoints = MeetingCheckpoints(first, clock=lambda: now[0])
+        await checkpoints.save(self.state)
+        self.db.rows[first.key]['leaseUntil'] = 0
+        second = MeetingSessions(self.db, self.a, 'coalesced')
+        await second.acquire()
+        now[0] += 5
+        for _ in range(2):
+            with self.assertRaises(MeetingBusy):
+                await checkpoints.save(self.state)
+
+    async def test_work_completion_wakes_socket_without_waiting_for_audio_or_poll_timeout(self):
+        self.db.test_drive = FakeDrive()
+        accepted = []
+        completed = []
+        class TimedSocket(RecoverySocket):
+            async def send_json(self, message):
+                if message['type'] == 'transcription_state':
+                    accepted.append(time.perf_counter())
+                await super().send_json(message)
+        async def transcribe(audio):
+            await asyncio.sleep(.01)
+            completed.append(time.perf_counter())
+            return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': 'complete words'}]}
+        ws = TimedSocket(self.db, window(1, 'audio'), end_ack=1)
+        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''), patch.object(route, 'transcribe_snapshot', transcribe):
+            await asyncio.wait_for(route.meeting_stream(ws), 2)
+        self.assertLess(accepted[0] - completed[0], .15)
 
     async def test_revoked_session_cannot_resume_or_write(self):
         first = MeetingSessions(self.db, self.a, 'meeting'); await first.acquire()

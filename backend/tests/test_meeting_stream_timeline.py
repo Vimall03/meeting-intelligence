@@ -187,6 +187,10 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
 
                 class ContinuingSocket(FakeWebSocket):
                     next_audio = False
+                    def __init__(self):
+                        super().__init__()
+                        self.next_ready = asyncio.Event()
+
                     async def receive_bytes(self):
                         if not self.received_audio:
                             self.received_audio = True
@@ -194,15 +198,23 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
                         if self.next_audio:
                             self.next_audio = False
                             return b"later"
-                        await self.finished.wait()
+                        # A real pending socket receive wakes when later audio
+                        # arrives; it does not require periodic cancellation.
+                        await self.next_ready.wait()
+                        self.next_ready.clear()
+                        if self.next_audio:
+                            self.next_audio = False
+                            return b"later"
                         raise WebSocketDisconnect()
 
                     async def send_json(self, message):
                         self.sent.append(message)
                         if message.get("type") == "timeline_snapshot" and message.get("revision") == 2:
                             self.next_audio = True
+                            self.next_ready.set()
                         if message.get("type") == "transcription_state" and "next topic" in message["transcript"]:
                             self.finished.set()
+                            self.next_ready.set()
 
                 websocket = ContinuingSocket()
                 websocket.app.state.atlassian = FailingAtlassian()

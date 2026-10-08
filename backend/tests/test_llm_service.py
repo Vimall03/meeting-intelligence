@@ -21,6 +21,8 @@ class LlmServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(request.headers["authorization"], "Bearer test-key")
             payload = json.loads(request.content)
             self.assertEqual(payload["model"], "google/gemma-4-26b-a4b-it")
+            self.assertEqual(payload['provider'], {'sort': 'latency'})
+            self.assertEqual(payload['max_tokens'], 256)
             system_message = payload["messages"][0]
             self.assertEqual(system_message["role"], "system")
             self.assertIn("existing Google Drive files", system_message["content"])

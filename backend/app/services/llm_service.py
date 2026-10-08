@@ -136,6 +136,8 @@ class LlmService:
                     "model": self._model,
                     "response_format": {"type": "json_object"},
                     "temperature": 0.2,
+                    "provider": {"sort": "latency"},
+                    "max_tokens": 256 if event.type == 'SEARCH_EXISTING_WORK' else 512,
                     "messages": messages,
                 },
             )

@@ -1,6 +1,7 @@
 import base64
 import io
 import wave
+import threading
 
 import httpx
 import numpy as np
@@ -22,6 +23,16 @@ class OpenRouterTranscriptionService:
         self.model = model
         self.endpoint = endpoint
         self.transport = transport
+        # HTTPX's synchronous client can serve independent requests from the
+        # audio thread pool; only provider auth is shared, never meeting data.
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(60.0, connect=3.0, pool=5.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=30),
+            transport=transport,
+        )
+
+    def close(self):
+        self._client.close()
 
     def transcribe(self, file_path: str, start_seconds: float = 0.0) -> dict:
         with observe('audio.decode', stage='stt'):
@@ -41,23 +52,19 @@ class OpenRouterTranscriptionService:
             },
             "response_format": "json",
         }
-        with httpx.Client(
-            timeout=60.0,
-            transport=self.transport,
-        ) as client:
-            with observe('provider.request', provider='openrouter', stage='stt', model=self.model) as metrics:
-                response = client.post(
-                    self.endpoint,
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json=payload,
+        with observe('provider.request', provider='openrouter', stage='stt', model=self.model) as metrics:
+            response = self._client.post(
+                self.endpoint,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=payload,
+            )
+            metrics['status_code'] = response.status_code
+            if not response.is_success:
+                raise httpx.HTTPStatusError(
+                    f"OpenRouter transcription failed ({response.status_code})",
+                    request=response.request,
+                    response=response,
                 )
-                metrics['status_code'] = response.status_code
-                if not response.is_success:
-                    raise httpx.HTTPStatusError(
-                        f"OpenRouter transcription failed ({response.status_code})",
-                        request=response.request,
-                        response=response,
-                    )
 
         result = response.json()
         segments = [
@@ -97,10 +104,29 @@ class OpenRouterTranscriptionService:
         return output.getvalue()
 
 
+_service = None
+_service_lock = threading.Lock()
+
+
+def transcription_service():
+    global _service
+    with _service_lock:
+        if _service is None:
+            _service = OpenRouterTranscriptionService(
+                api_key=settings.openrouter_api_key,
+                model=settings.openrouter_stt_model,
+                endpoint=settings.openrouter_stt_url,
+            )
+        return _service
+
+
+def close_transcription_service():
+    global _service
+    with _service_lock:
+        if _service is not None:
+            _service.close()
+            _service = None
+
+
 def transcribe_realtime_chunk(file_path: str, start_seconds: float = 0.0) -> dict:
-    service = OpenRouterTranscriptionService(
-        api_key=settings.openrouter_api_key,
-        model=settings.openrouter_stt_model,
-        endpoint=settings.openrouter_stt_url,
-    )
-    return service.transcribe(file_path, start_seconds)
+    return transcription_service().transcribe(file_path, start_seconds)

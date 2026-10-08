@@ -12,7 +12,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 from contextlib import AsyncExitStack
 from app.core.auth import consume_ticket, ensure_active, failure
 from app.services.integrations import provider_session
-from app.services.meeting_sessions import MeetingSessions, MeetingBusy, MeetingResumeExpired, context_state, restore_context, event_state, restore_events
+from app.services.meeting_sessions import MeetingSessions, MeetingCheckpoints, MeetingBusy, MeetingResumeExpired, context_state, restore_context, event_state, restore_events
 from fastapi.concurrency import run_in_threadpool
 
 from app.core.config import settings
@@ -121,12 +121,14 @@ async def _meeting_stream(websocket: WebSocket):
     checkpoint_count = 0
     checkpoint_total_ms = 0.0
     checkpoint_max_ms = 0.0
+    checkpoints = MeetingCheckpoints(session)
 
     async def checkpoint():
         nonlocal checkpoint_count, checkpoint_total_ms, checkpoint_max_ms
         started = time.perf_counter()
+        wrote = False
         try:
-            await session.save({'ack': ack, 'audioEnd': transcribed_audio_end,
+            wrote = await checkpoints.save({'ack': ack, 'audioEnd': transcribed_audio_end,
                 'transcript': transcript_text, 'context': context_state(meeting_context),
                 'events': event_state(event_service), 'timeline': timeline.snapshot(), 'jobs': jobs})
         except Exception as exc:
@@ -135,9 +137,10 @@ async def _meeting_stream(websocket: WebSocket):
             raise
         finally:
             duration_ms = (time.perf_counter() - started) * 1000
-            checkpoint_count += 1
-            checkpoint_total_ms += duration_ms
-            checkpoint_max_ms = max(checkpoint_max_ms, duration_ms)
+            if wrote:
+                checkpoint_count += 1
+                checkpoint_total_ms += duration_ms
+                checkpoint_max_ms = max(checkpoint_max_ms, duration_ms)
             if duration_ms >= 500:
                 log_event('meeting.checkpoint.slow', duration_ms=round(duration_ms, 2), ack=ack)
 
@@ -257,14 +260,27 @@ async def _meeting_stream(websocket: WebSocket):
     last_heartbeat = 0.0
     last_client_ping = time.monotonic()
     close_reason = 'disconnected'
+    receive_task = None
     try:
         await safe_send({'type': 'auth_ready', 'expiresAt': principal.expires,
             'expiresIn': max(0, principal.expires - int(time.time())), 'ack': ack, 'meetingId': session.session_id})
         await safe_send(timeline.snapshot())
         while True:
             try:
-                message = await asyncio.wait_for(websocket.receive(), timeout=0.25)
-                if message['type'] == 'websocket.disconnect':
+                if receive_task is None:
+                    receive_task = asyncio.create_task(websocket.receive())
+                work = {receive_task, *(task for task, _, _ in llm_tasks),
+                        *(task for task, _, _ in drive_tasks), *(task for task, _, _ in atlassian_tasks)}
+                if transcription_task:
+                    work.add(transcription_task)
+                if jev_task:
+                    work.add(jev_task)
+                ready, _ = await asyncio.wait(work, timeout=0.25, return_when=asyncio.FIRST_COMPLETED)
+                message = {}
+                if receive_task in ready:
+                    received, receive_task = receive_task, None
+                    message = received.result()
+                if message.get('type') == 'websocket.disconnect':
                     raise WebSocketDisconnect()
                 if message.get('text') is not None:
                     if len(message['text']) > 512:
@@ -597,6 +613,10 @@ async def _meeting_stream(websocket: WebSocket):
         with contextlib.suppress(Exception):
             await websocket.close(code=1013, reason='MI-CON-004')
     finally:
+        if receive_task:
+            receive_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await receive_task
         # Save pending read-only jobs before cancellation; another process can
         # replay them using the same authenticated meeting identity.
         with contextlib.suppress(Exception):

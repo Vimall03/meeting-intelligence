@@ -15,6 +15,23 @@ from app.services.audio_decode import SAMPLE_RATE
 
 
 class OpenRouterTranscriptionServiceTests(unittest.TestCase):
+    def test_reuses_one_client_for_multiple_audio_windows_and_closes_it(self):
+        calls = []
+        def respond(request):
+            calls.append(request)
+            return httpx.Response(200, json={'text': 'spoken words'})
+        service = OpenRouterTranscriptionService('test-key', transport=httpx.MockTransport(respond))
+        client = service._client
+        try:
+            with patch('app.services.openrouter_stt_service.load_audio', return_value=np.zeros(SAMPLE_RATE, dtype=np.float32)):
+                self.assertEqual(service.transcribe('first')['segments'][0]['text'], 'spoken words')
+                self.assertEqual(service.transcribe('second')['segments'][0]['text'], 'spoken words')
+            self.assertIs(service._client, client)
+            self.assertEqual(len(calls), 2)
+        finally:
+            service.close()
+        self.assertTrue(client.is_closed)
+
     def test_transcribes_webm_and_returns_timestamped_segments(self) -> None:
         def respond(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.headers["authorization"], "Bearer test-key")
