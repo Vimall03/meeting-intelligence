@@ -11,7 +11,7 @@ import time, json
 from fastapi import WebSocketDisconnect
 
 from app.services.jev_service import JevDecision
-from app.services.llm_service import LlmResult
+from app.services.llm_service import IntentReview, LlmResult
 
 
 route = importlib.import_module("app.api.routes.meeting_stream")
@@ -93,7 +93,7 @@ class FakeJev:
     def __init__(self, **_kwargs) -> None:
         pass
 
-    async def decide(self, _recent: str, _new: str) -> JevDecision:
+    async def decide(self, _recent: str, _new: str, **_kwargs) -> JevDecision:
         return JevDecision(0.9, 0.9)
 
     async def close(self) -> None:
@@ -103,6 +103,9 @@ class FakeJev:
 class FakeLlm:
     def __init__(self, **_kwargs) -> None:
         pass
+
+    async def review_intent(self, recent, new, **_kwargs):
+        return IntentReview(True, True, search_target="launch plan", task_action="Send launch plan")
 
     async def process_event(self, event) -> LlmResult:
         if event.type == "SUGGEST_NEW_TASK":
@@ -116,6 +119,88 @@ class FakeLlm:
 
 
 class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_uncertain_intent_produces_cards_only_after_semantic_confirmation(self):
+        class UncertainJev(FakeJev):
+            async def decide(self, recent, new, **_kwargs):
+                return JevDecision(.4, .37)
+        socket = FakeWebSocket()
+        async def transcribe(_audio):
+            return {"audio_duration": 3, "segments": [{"start": 0, "end": 3,
+                "text": "Please send the launch plan to Maya."}]}
+        with (
+            patch.object(route, 'provider_session', scoped_provider),
+            patch.object(socket.app.state.users, 'test_drive', socket.app.state.google_drive, create=True),
+            patch.object(route.settings, "openrouter_api_key", "test-key"),
+            patch.object(route, "JevService", UncertainJev),
+            patch.object(route, "LlmService", FakeLlm),
+            patch.object(route, "transcribe_snapshot", transcribe),
+        ):
+            await asyncio.wait_for(route.meeting_stream(socket), timeout=2)
+        items = [m for m in socket.sent if m["type"] == "timeline_snapshot"][-1]["items"]
+        self.assertEqual({item["kind"] for item in items}, {"search_results", "task_suggestion"})
+
+    async def test_failed_decision_is_retried_without_waiting_for_more_speech(self):
+        from app.services.jev_service import InvalidJevDecision
+        for first_error in (TimeoutError("private provider details"), InvalidJevDecision("Incomplete meeting decision")):
+            with self.subTest(error=type(first_error).__name__):
+                calls = []
+                class RecoveringJev(FakeJev):
+                    async def decide(self, recent, new, **_kwargs):
+                        calls.append((recent, new))
+                        if len(calls) < 3:
+                            raise first_error
+                        return JevDecision(.9, .9)
+                websocket = FakeWebSocket()
+                async def transcribe(_audio):
+                    return {"audio_duration": 3, "segments": [{"start": 0, "end": 3,
+                        "text": "Please send the launch plan to Maya."}]}
+                with (
+                    patch.object(route, 'provider_session', scoped_provider),
+                    patch.object(websocket.app.state.users, 'test_drive', websocket.app.state.google_drive, create=True),
+                    patch.object(route.settings, "openrouter_api_key", "test-key"),
+                    patch.object(route, "JevService", RecoveringJev),
+                    patch.object(route, "LlmService", FakeLlm),
+                    patch.object(route, "transcribe_snapshot", transcribe),
+                ):
+                    await asyncio.wait_for(route.meeting_stream(websocket), timeout=4)
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(calls[0], calls[1])
+                self.assertEqual(calls[0], calls[2])
+                items = [m for m in websocket.sent if m["type"] == "timeline_snapshot"][-1]["items"]
+                self.assertEqual(len(items), 2)
+                self.assertTrue(any(item["kind"] == "search_results" for item in items))
+                self.assertTrue(any(item["kind"] == "task_suggestion" for item in items))
+
+    async def test_decision_outage_has_a_bounded_retry_budget(self):
+        calls = []
+        class UnavailableJev(FakeJev):
+            async def decide(self, recent, new, **_kwargs):
+                calls.append(new)
+                raise TimeoutError("private provider details")
+        socket = FakeWebSocket()
+        async def transcribe(_audio):
+            return {"audio_duration": 3, "segments": [{"start": 0, "end": 3,
+                "text": "Please send the launch plan to Maya."}]}
+        with (
+            patch.object(route, 'provider_session', scoped_provider),
+            patch.object(socket.app.state.users, 'test_drive', socket.app.state.google_drive, create=True),
+            patch.object(route.settings, "openrouter_api_key", "test-key"),
+            patch.object(route, "JevService", UnavailableJev),
+            patch.object(route, "LlmService", FakeLlm),
+            patch.object(route, "transcribe_snapshot", transcribe),
+        ):
+            runner = asyncio.create_task(route.meeting_stream(socket))
+            try:
+                await asyncio.sleep(2)
+                self.assertEqual(len(calls), 3)
+                await asyncio.sleep(.5)
+                self.assertEqual(len(calls), 3)
+            finally:
+                socket.finished.set()
+                await asyncio.wait_for(runner, timeout=1)
+        self.assertTrue(any(m["type"] == "audio_ack" for m in socket.sent))
+        self.assertFalse(any(m.get("items") for m in socket.sent))
+
     async def test_websocket_publishes_complete_ordered_timeline(self) -> None:
         websocket = FakeWebSocket()
 
@@ -254,7 +339,9 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
         def init(service, config, **kwargs): original(service, config, transport=httpx.MockTransport(drive_api), **kwargs)
         async def transcribe(audio):
             return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': 'Please send the launch plan to Maya.'}]}
-        with self.assertLogs('meeting_intelligence', level='INFO') as captured, patch.object(route, 'provider_session', real_provider), patch.object(GoogleDriveService, '__init__', init), patch.object(route.settings, 'openrouter_api_key', 'test-key'), patch.object(route, 'JevService', FakeJev), patch.object(route, 'LlmService', FakeLlm), patch.object(route, 'transcribe_snapshot', transcribe):
+        class UncertainJev(FakeJev):
+            async def decide(self, recent, new, **_kwargs): return JevDecision(.4, .4)
+        with self.assertLogs('meeting_intelligence', level='INFO') as captured, patch.object(route, 'provider_session', real_provider), patch.object(GoogleDriveService, '__init__', init), patch.object(route.settings, 'openrouter_api_key', 'test-key'), patch.object(route, 'JevService', UncertainJev), patch.object(route, 'LlmService', FakeLlm), patch.object(route, 'transcribe_snapshot', transcribe):
             await asyncio.wait_for(asyncio.gather(*(route.meeting_stream(s) for s in sockets)), timeout=5)
         from app.core.observability import JsonFormatter
         logs = [json.loads(JsonFormatter().format(record)) for record in captured.records]
@@ -265,6 +352,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len({entry['request_id'] for entry in own}), 1)
             self.assertTrue(any(entry['event'] == 'meeting.transcription.accepted' and entry['sequence'] == 1 for entry in own))
             self.assertTrue(any(entry['event'] == 'meeting.search.results' and entry['provider'] == 'google_drive' for entry in own))
+            self.assertTrue(any(entry['event'] == 'meeting.operation.completed' and entry.get('stage') == 'intent_review' for entry in own))
         self.assertEqual(len({entry['connection_id'] for entry in logs}), 2)
         for secret in ('-secret', '-refresh', 'launch plan', '-private', 'Maya'):
             self.assertNotIn(secret, json.dumps(logs))

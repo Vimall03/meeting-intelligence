@@ -270,7 +270,10 @@ class EventServiceTests(unittest.TestCase):
         too_soon = service.start_pending(
             _search_decision(0.8), "recent", "Hmm, it was about costs.", now=1.0
         )
-        self.assertEqual(too_soon, [])
+        self.assertEqual(len(too_soon), 1)
+        self.assertTrue(too_soon[0].is_topic_check)
+        self.assertFalse(service.accept_search_terms(
+            ["costs"], ["costs"], False, 1, is_topic_check=True))
 
         [refined] = service.start_pending(
             _search_decision(0.75),
@@ -423,7 +426,60 @@ class EventServiceTests(unittest.TestCase):
             )
         )
 
+    def test_different_request_during_cooldown_is_checked_before_suppression(self):
+        service = self._frozen_maturity_session()
+        # The previous refinement just ran at 3s. A new target at 3.1s
+        # previously disappeared before its query could be built.
+        [event] = service.start_pending(
+            _search_decision(.9), "recent", "Pull up the travel budget.", now=3.1)
+        self.assertTrue(event.is_topic_check)
+        self.assertTrue(service.accept_search_terms(
+            ["travel budget"], ["travel budget"], False, 3.1, is_topic_check=True))
+
+    def test_initial_search_cooldown_still_allows_new_target(self):
+        service = EventService(search_threshold=.75, task_threshold=.75, dedupe_window_seconds=90)
+        service.start_pending(_search_decision(.9), "recent", "Find the engineering budget.", 0)
+        service.accept_search_terms(["engineering budget"], ["engineering budget"], False, 0)
+        [event] = service.start_pending(
+            _search_decision(.9), "recent", "Now show the travel budget.", 1)
+        self.assertTrue(event.is_topic_check)
+        self.assertTrue(service.accept_search_terms(
+            ["travel budget"], ["travel budget"], False, 1, is_topic_check=True))
+
+    def test_shared_word_does_not_freeze_a_new_artifact(self):
+        for first, second in (
+            ("engineering budget", "travel budget"),
+            ("maturity flowchart", "maturity roadmap"),
+            ("Q3 budget", "Q4 budget"),
+            ("PAY-42", "PAY-43"),
+        ):
+            with self.subTest(first=first, second=second):
+                service = EventService(search_threshold=.75, task_threshold=.75, dedupe_window_seconds=90)
+                service.start_pending(_search_decision(.9), "recent", "First request.", 0)
+                service.accept_search_terms([first], [first], False, 0)
+                service.start_pending(_search_decision(.9), "recent", "More detail.", 3)
+                # Emulate an exhausted refinement budget without changing terms.
+                [event] = service.start_pending(_search_decision(.9), "recent", "Second request.", 6)
+                self.assertTrue(event.is_topic_check)
+                self.assertTrue(service.accept_search_terms(
+                    [second], [second], False, 6, is_topic_check=True))
+
+    def test_more_specific_target_is_not_deduped_by_shorter_previous_target(self):
+        service = EventService(search_threshold=.75, task_threshold=.75, dedupe_window_seconds=90)
+        self.assertTrue(service.accept_search_terms(["engineering budget"], ["engineering budget"], False, 0))
+        self.assertTrue(service.accept_search_terms(["engineering budget 2027"], ["engineering budget 2027"], False, 3))
+        self.assertFalse(service.accept_search_terms(["engineering budget 2027"], ["engineering budget 2027"], False, 4))
+
+    def test_confirmed_task_preserves_original_score_without_lowering_search_gate(self):
+        service = EventService(search_threshold=.75, task_threshold=.75, dedupe_window_seconds=90)
+        events = service.start_pending(
+            JevDecision(.4, .37, task_confirmed=True),
+            "Sales needs a demo tenant. I can get that ready by Thursday.",
+            "Ready by Thursday.", 0)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].type, "SUGGEST_NEW_TASK")
+        self.assertEqual(events[0].score, .37)
+
 
 if __name__ == "__main__":
     unittest.main()
-

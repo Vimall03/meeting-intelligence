@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import httpx
 from app.core.observability import provider_request
@@ -11,6 +12,24 @@ class JevDecision:
     search_existing_work_probability: float
     suggest_new_task_probability: float
     cost: float | None = None
+    search_confirmed: bool = False
+    task_confirmed: bool = False
+    wait_for_continuation: bool = False
+
+
+class InvalidJevDecision(ValueError):
+    """An incomplete response must not consume pending meeting context."""
+
+
+def _probability(answers: object, name: str) -> float:
+    answer = answers.get(name) if isinstance(answers, dict) else None
+    value = answer.get("noul") if isinstance(answer, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidJevDecision("Incomplete meeting decision")
+    score = float(value)
+    if not math.isfinite(score) or not 0.0 <= score <= 1.0:
+        raise InvalidJevDecision("Invalid meeting decision score")
+    return score
 
 
 class JevService:
@@ -31,7 +50,8 @@ class JevService:
         )
 
     async def decide(
-        self, recent_context: str, new_context: str
+        self, recent_context: str, new_context: str, *, latest_context: str | None = None,
+        background_context: str | None = None
     ) -> JevDecision:
         response = await provider_request(
             self._client, 'POST', self._endpoint,
@@ -41,6 +61,8 @@ class JevService:
                 "state": {
                     "recent_context": recent_context,
                     "new_context": new_context,
+                    **({"latest_context": latest_context} if latest_context is not None else {}),
+                    **({"background_context": background_context} if background_context else {}),
                 },
                 "questions": {
                     "should_search_existing_work": {
@@ -52,6 +74,14 @@ class JevService:
                             "resolve references and identify the specific project, decision, "
                             "or artifact being discussed; recent context alone is not a reason "
                             "to search.\n\n"
+                            "When latest_context is present, new_context may include "
+                            "a retained unfinished thought. latest_context identifies "
+                            "the newly arrived speech: it must introduce, complete, or "
+                            "clarify the current retrieval need. An unrelated new "
+                            "topic or filler alone does not revive an earlier request. "
+                            "background_context contains older speech. Use it only "
+                            "to resolve a fresh reference from the same workstream; "
+                            "it is not a fresh retrieval signal. "
                             "Answer yes for either explicit OR implicit retrieval intent. "
                             "Explicit examples: 'let's pull up the cost comparison document', "
                             "'open the rollout deck', or 'find the migration plan'. Do not "
@@ -108,7 +138,18 @@ class JevService:
                             "created, requested, assigned, agreed to, or committed to "
                             "concrete new work that would be useful to capture as a new "
                             "task? Use recent_context to resolve references and speech "
-                            "split across transcript windows. Treat a clear request or "
+                            "split across transcript windows. "
+                            "When latest_context is present it identifies the newly "
+                            "arrived speech, while new_context can also retain an "
+                            "unfinished thought from the preceding few seconds. "
+                            "The latest speech must introduce, complete, accept, or "
+                            "clarify that work; unrelated speech or filler does not "
+                            "revive a preceding request. "
+                            "background_context contains older speech. Use it only "
+                            "to recover what a fresh 'those', 'it', or 'that work' "
+                            "refers to in the same workstream; never replay an old "
+                            "request just because it is in background_context. "
+                            "Treat a clear request or "
                             "commitment as actionable even when phrased softly, without "
                             "a named owner or deadline. This includes a request to "
                             "follow up with customers, a commitment to run a survey, "
@@ -117,6 +158,19 @@ class JevService:
                             "A reminder to do concrete unfinished work can be a task. "
                             "A later window that clarifies an emerging request is still "
                             "a positive signal; downstream logic handles deduplication. "
+                            "Transcription may insert periods inside an unfinished "
+                            "sentence. Reconstruct the current thought from new_context "
+                            "and the immediately preceding speech in recent_context. "
+                            "The action verb, concrete work, acceptance, owner, and "
+                            "deadline do not need to occur in the same window. A short "
+                            "tail that completes a commitment or a deadline is a yes "
+                            "when the underlying unfinished work is identifiable. "
+                            "A brief acceptance of a concrete proposed next step also "
+                            "makes that work actionable. Distinguish acceptance from "
+                            "filler acknowledgement or an unrelated topic change. "
+                            "Do not repeat an old task just because it remains in "
+                            "recent_context; new_context must complete, accept, or "
+                            "introduce the work. "
                             "Realistic actionable examples: 'The export drops the last row; "
                             "could you take a look after this call?', 'We should add retries "
                             "before launch', 'I will send the updated rollout notes to support', "
@@ -148,13 +202,11 @@ class JevService:
         )
         response.raise_for_status()
         payload = response.json()
-        answers = payload.get("answers", {})
-        search_probability = float(
-            answers.get("should_search_existing_work", {}).get("noul", 0.0)
-        )
-        task_probability = float(
-            answers.get("should_suggest_new_task", {}).get("noul", 0.0)
-        )
+        if not isinstance(payload, dict):
+            raise InvalidJevDecision("Incomplete meeting decision")
+        answers = payload.get("answers")
+        search_probability = _probability(answers, "should_search_existing_work")
+        task_probability = _probability(answers, "should_suggest_new_task")
         usage = payload.get("usage", {})
         return JevDecision(
             search_existing_work_probability=search_probability,

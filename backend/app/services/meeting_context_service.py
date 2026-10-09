@@ -38,6 +38,8 @@ class JevContextSnapshot:
     recent_context: str
     new_context: str
     segment_count: int
+    latest_context: str = ""
+    background_context: str = ""
 
 
 class MeetingContextService:
@@ -48,6 +50,7 @@ class MeetingContextService:
         window_seconds: float = 45.0,
         max_segments: int = 250,
         turn_gap_seconds: float = 12.0,
+        background_window_seconds: float = 180.0,
     ) -> None:
         if window_seconds <= 0:
             raise ValueError("window_seconds must be greater than zero")
@@ -55,12 +58,17 @@ class MeetingContextService:
             raise ValueError("max_segments must be greater than zero")
         if turn_gap_seconds < 0:
             raise ValueError("turn_gap_seconds must not be negative")
+        if background_window_seconds <= 0:
+            raise ValueError("background_window_seconds must be greater than zero")
 
         self.window_seconds = window_seconds
         self.max_segments = max_segments
         self.turn_gap_seconds = turn_gap_seconds
+        self.background_window_seconds = max(background_window_seconds, window_seconds)
         self._segments: list[TranscriptSegment] = []
+        self._background_segments: list[TranscriptSegment] = []
         self._unevaluated_segments: list[TranscriptSegment] = []
+        self._intent_candidates: list[TranscriptSegment] = []
         self._seen: set[tuple[float, float, str, str]] = set()
         self.last_jev_evaluation_time: float | None = None
 
@@ -79,6 +87,7 @@ class MeetingContextService:
                 continue
 
             self._segments.append(segment)
+            self._background_segments.append(segment)
             self._unevaluated_segments.append(segment)
             self._seen.add(segment_key)
             accepted.append(segment)
@@ -98,26 +107,45 @@ class MeetingContextService:
         """Return the rolling transcript as conversational speaker turns."""
         return self._segments_as_text(self._segments)
 
+    def background_text(self) -> str:
+        """Older speech only helps resolve the object of a fresh cue."""
+        return self._segments_as_text(self._background_segments)[-9000:]
+
     def prepare_jev_context(self) -> JevContextSnapshot | None:
         """Build a stable Jev snapshot without consuming newly added text."""
         if not self._unevaluated_segments:
             return None
+        # An uncertain, unfinished thought can span multiple successful
+        # decisions. Keep a short overlap only until the next fresh speech;
+        # candidates alone never schedule another evaluation.
+        cutoff = max(s.end for s in self._unevaluated_segments) - 12.0
+        candidates = [s for s in self._intent_candidates if s.end > cutoff]
         return JevContextSnapshot(
             recent_context=self.as_text(),
-            new_context=self._segments_as_text(self._unevaluated_segments),
+            new_context=self._segments_as_text([*candidates, *self._unevaluated_segments]),
             segment_count=len(self._unevaluated_segments),
+            latest_context=self._segments_as_text(self._unevaluated_segments),
+            background_context=self.background_text(),
         )
 
     def complete_jev_evaluation(
-        self, snapshot: JevContextSnapshot, evaluated_at: float
+        self, snapshot: JevContextSnapshot, evaluated_at: float, *, retain_for_followup: bool = False
     ) -> None:
         """Commit a successful evaluation while preserving later arrivals."""
+        evaluated = self._unevaluated_segments[: snapshot.segment_count]
+        if retain_for_followup and evaluated:
+            cutoff = max(s.end for s in evaluated) - 12.0
+            self._intent_candidates = [s for s in [*self._intent_candidates, *evaluated] if s.end > cutoff][-self.max_segments:]
+        else:
+            self._intent_candidates.clear()
         del self._unevaluated_segments[: snapshot.segment_count]
         self.last_jev_evaluation_time = evaluated_at
 
     def clear(self) -> None:
         self._segments.clear()
+        self._background_segments.clear()
         self._unevaluated_segments.clear()
+        self._intent_candidates.clear()
         self._seen.clear()
         self.last_jev_evaluation_time = None
 
@@ -174,6 +202,10 @@ class MeetingContextService:
         cutoff = newest_end - self.window_seconds
         self._segments = [
             segment for segment in self._segments if segment.start >= cutoff
+        ][-self.max_segments :]
+        background_cutoff = newest_end - self.background_window_seconds
+        self._background_segments = [
+            segment for segment in self._background_segments if segment.end > background_cutoff
         ][-self.max_segments :]
         self._seen = {self._segment_key(segment) for segment in self._segments}
 

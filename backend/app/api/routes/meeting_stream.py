@@ -28,6 +28,7 @@ from app.services.google_drive_service import (
 from app.services.jev_service import JevDecision, JevService
 from app.services.llm_service import LlmResult, LlmService
 from app.services.meeting_context_service import MeetingContextService, JevContextSnapshot
+from app.services.meeting_intent_service import decide_meeting_intent
 from app.services.meeting_timeline_service import MeetingTimelineService
 from app.services.openrouter_stt_service import transcribe_realtime_chunk
 
@@ -54,11 +55,16 @@ async def transcribe_snapshot(audio: bytes) -> dict:
 async def evaluate_new_context(
     meeting_context: MeetingContextService,
     jev: JevService,
+    llm: LlmService | None = None,
+    *, known_tasks=(), known_search_terms=(),
 ) -> tuple[JevDecision, JevContextSnapshot]:
     snapshot = meeting_context.prepare_jev_context()
     if snapshot is None:
         raise RuntimeError("Jev evaluation started without new context")
-    decision = await jev.decide(snapshot.recent_context, snapshot.new_context)
+    decision = await decide_meeting_intent(jev, llm, snapshot.recent_context, snapshot.new_context,
+        search_threshold=settings.jev_search_threshold, task_threshold=settings.jev_task_threshold,
+        review_minimum=settings.intent_review_minimum, latest_context=snapshot.latest_context,
+        background_context=snapshot.background_context, known_tasks=known_tasks, known_search_terms=known_search_terms)
     return decision, snapshot
 
 async def search_atlassian(atlassian, search_terms) -> dict:
@@ -163,6 +169,7 @@ async def _meeting_stream(websocket: WebSocket):
     meeting_context = MeetingContextService(
         window_seconds=settings.meeting_context_window_seconds,
         turn_gap_seconds=settings.meeting_context_turn_gap_seconds,
+        background_window_seconds=settings.meeting_background_window_seconds,
     )
     transcription_task: asyncio.Task[dict] | None = None
     transcription_started_at: float | None = None
@@ -197,6 +204,10 @@ async def _meeting_stream(websocket: WebSocket):
     jev_task: asyncio.Task[tuple[JevDecision, JevContextSnapshot]] | None = None
     jev_started_at: float | None = None
     jev_evaluation_requested = bool(meeting_context.prepare_jev_context())
+    jev_attempt = 0
+    jev_retry_at = 0.0
+    jev_retry_context = None
+    jev_sequence = None
     llm_tasks: list[tuple[asyncio.Task[LlmResult], float, MeetingEvent]] = []
     drive_tasks: list[tuple[asyncio.Task[dict], float, str]] = []
     atlassian_tasks: list[tuple[asyncio.Task[dict], float, str]] = []
@@ -382,6 +393,7 @@ async def _meeting_stream(websocket: WebSocket):
                                     new_text,
                                     recent_context=meeting_context.as_text(),
                                     now=now,
+                                    background_context=meeting_context.background_text(),
                                 )
                             )
 
@@ -410,19 +422,40 @@ async def _meeting_stream(websocket: WebSocket):
                     decision, evaluated_snapshot = completed_jev_task.result()
                 except Exception as error:
                     log_event('meeting.decision.failed', level=logging.WARNING,
-                              elapsed_ms=round(jev_latency * 1000, 2), **error_fields(error))
+                              elapsed_ms=round(jev_latency * 1000, 2), attempt=jev_attempt,
+                              sequence=jev_sequence,
+                              **error_fields(error))
+                    # Keep the snapshot unconsumed and retry even if the
+                    # speaker stopped. New speech gets its own retry budget.
+                    if jev_attempt < 3:
+                        jev_evaluation_requested = True
+                        jev_retry_at = time.monotonic() + 0.5 * 2 ** (jev_attempt - 1)
+                        log_event('meeting.decision.retry', attempt=jev_attempt + 1,
+                                  reason='decision_unavailable')
+                    else:
+                        log_event('meeting.decision.exhausted', level=logging.WARNING,
+                                  attempt=jev_attempt, reason='decision_unavailable')
                 else:
-                    meeting_context.complete_jev_evaluation(evaluated_snapshot, time.monotonic())
+                    jev_attempt = 0
+                    jev_retry_at = 0.0
+                    meeting_context.complete_jev_evaluation(evaluated_snapshot, time.monotonic(),
+                        retain_for_followup=decision.wait_for_continuation)
+                    if decision.wait_for_continuation:
+                        log_event('meeting.intent.continuation', sequence=jev_sequence,
+                                  reason='awaiting_more_speech', text_chars=len(evaluated_snapshot.new_context))
                     events = event_service.start_pending(
                         decision,
                         recent_context=meeting_context.as_text(),
                         triggering_context=evaluated_snapshot.new_context,
                         now=now,
+                        background_context=evaluated_snapshot.background_context,
                     )
                     await dispatch_events(events)
                     log_event('meeting.decision', elapsed_ms=round(jev_latency * 1000, 2),
                               search_probability=decision.search_existing_work_probability,
-                              task_probability=decision.suggest_new_task_probability, cost_usd=decision.cost)
+                              task_probability=decision.suggest_new_task_probability, cost_usd=decision.cost,
+                              search_confirmed=decision.search_confirmed, task_confirmed=decision.task_confirmed,
+                              sequence=jev_sequence)
 
             timed_out_events = event_service.check_timeouts(
                 recent_context=meeting_context.as_text(), now=now
@@ -579,13 +612,23 @@ async def _meeting_stream(websocket: WebSocket):
                 jev is not None
                 and jev_task is None
                 and jev_evaluation_requested
+                and now >= jev_retry_at
             ):
                 jev_snapshot = meeting_context.prepare_jev_context()
                 if jev_snapshot is not None:
+                    if jev_snapshot.new_context != jev_retry_context:
+                        jev_retry_context = jev_snapshot.new_context
+                        jev_attempt = 0
+                    jev_attempt += 1
+                    jev_sequence = ack
                     jev_evaluation_requested = False
                     jev_started_at = now
                     jev_task = asyncio.create_task(
-                        observe_operation('jev', evaluate_new_context(meeting_context, jev),
+                        observe_operation('jev', evaluate_new_context(meeting_context, jev, llm,
+                            known_tasks=tuple(item['title'] for item in timeline.snapshot()['items']
+                                if item['kind'] == 'task_suggestion')[:12],
+                            known_search_terms=tuple(event_service._search_session.searched_terms)[:6]
+                                if event_service._active_search_session(now) is not None else ()),
                             model=settings.jev_model, sequence=ack, text_chars=len(jev_snapshot.new_context))
                     )
             # Changed work is captured before the next receive can suspend.

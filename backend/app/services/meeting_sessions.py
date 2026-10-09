@@ -106,13 +106,17 @@ class MeetingSessions:
 
 def context_state(context):
     return {'segments': [asdict(s) for s in context.get_segments()],
-        'pending': [asdict(s) for s in context._unevaluated_segments]}
+        'pending': [asdict(s) for s in context._unevaluated_segments],
+        'candidates': [asdict(s) for s in context._intent_candidates],
+        'background': [asdict(s) for s in context._background_segments]}
 
 
 def restore_context(context, state):
     context.add_segments(state.get('segments', []))
     from app.services.meeting_context_service import TranscriptSegment
     context._unevaluated_segments = [TranscriptSegment(**s) for s in state.get('pending', [])]
+    context._intent_candidates = [TranscriptSegment(**s) for s in state.get('candidates', [])]
+    context._background_segments = [TranscriptSegment(**s) for s in state.get('background', state.get('segments', []))]
 
 
 def event_state(service):

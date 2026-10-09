@@ -8,6 +8,38 @@ from app.services.llm_service import LlmService
 
 
 class LlmServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_intent_review_uses_text_only_and_requires_real_boolean_answers(self):
+        for data in (
+            {"search_existing_work": False, "suggest_new_task": True, "task_action": "Finish the requested work", "needs_more_context": False},
+            {"search_existing_work": "false", "suggest_new_task": True},
+            {"search_existing_work": False},
+            {"search_existing_work": False, "suggest_new_task": True, "task_action": "", "needs_more_context": False},
+        ):
+            with self.subTest(data=data):
+                def respond(request):
+                    payload = json.loads(request.content)
+                    speech = json.loads(payload["messages"][1]["content"])
+                    self.assertEqual(speech, {"recent_context": "unfinished work", "new_context": "by Thursday"})
+                    self.assertEqual(payload["max_tokens"], 192)
+                    return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(data)}}],
+                        "usage": {"cost": "private provider diagnostics"}})
+                service = LlmService(api_key="test-key", transport=httpx.MockTransport(respond))
+                try:
+                    if all(type(data.get(key)) is bool for key in ("search_existing_work", "suggest_new_task", "needs_more_context")) and data.get("task_action"):
+                        with self.assertLogs('meeting_intelligence', level='INFO') as captured:
+                            result = await service.review_intent("unfinished work", "by Thursday")
+                        self.assertFalse(result.search_existing_work)
+                        self.assertTrue(result.suggest_new_task)
+                        from app.core.observability import JsonFormatter
+                        encoded = json.dumps([JsonFormatter().format(record) for record in captured.records])
+                        self.assertNotIn("private provider diagnostics", encoded)
+                        self.assertNotIn("unfinished work", encoded)
+                    else:
+                        with self.assertRaises(ValueError):
+                            await service.review_intent("unfinished work", "by Thursday")
+                finally:
+                    await service.close()
+
     async def test_sends_event_specific_prompt_and_parses_json_response(self) -> None:
         event = MeetingEvent(
             type="SEARCH_EXISTING_WORK",

@@ -69,6 +69,7 @@ class MeetingEvent:
     # Raised while the active search topic is frozen; only searches if the
     # resulting terms turn out to be a different topic.
     is_topic_check: bool = False
+    background_context: str = ""
 
 
 @dataclass(slots=True)
@@ -81,6 +82,7 @@ class _PendingEvent:
     new_word_count: int = 0
     is_refinement: bool = False
     is_topic_check: bool = False
+    background_context: str = ""
 
 
 @dataclass(slots=True)
@@ -96,7 +98,9 @@ class _SearchSession:
 def _topic_tokens(terms: Sequence[str]) -> set[str]:
     tokens: set[str] = set()
     for token in re.findall(r"[a-z0-9]+", " ".join(terms).casefold()):
-        if token in _TOPIC_STOPWORDS or len(token) < 3:
+        # Keep quarters, years and ticket numbers: PAY-42 and PAY-43 are
+        # distinct targets even though the project prefix is identical.
+        if token in _TOPIC_STOPWORDS or (len(token) < 3 and not any(c.isdigit() for c in token)):
             continue
         if len(token) > 3 and token.endswith("s"):
             token = token[:-1]
@@ -106,15 +110,21 @@ def _topic_tokens(terms: Sequence[str]) -> set[str]:
 
 def _shares_topic(new_terms: Sequence[str], known_terms: Sequence[str]) -> bool:
     known = _topic_tokens(known_terms)
-    for token in _topic_tokens(new_terms):
+    new = _topic_tokens(new_terms)
+    matched = set()
+    for token in new:
         for known_token in known:
             if token == known_token:
-                return True
+                matched.add(token)
+                break
             shorter, longer = sorted((token, known_token), key=len)
             # e.g. "chart" / "flowchart"
             if len(shorter) >= 4 and shorter in longer:
-                return True
-    return False
+                matched.add(token)
+                break
+    # One shared word such as "budget" must not freeze a different budget.
+    # A short reference to the already searched artifact can still match.
+    return bool(new) and len(matched) / len(new) >= 0.8
 
 
 def _ends_sentence(text: str) -> bool:
@@ -199,15 +209,15 @@ class EventService:
             if now - searched_at < self._dedupe_window_seconds
         ]
         topic = frozenset(
-            re.findall(r"[a-z0-9]+", " ".join(primary_terms).casefold())
+            _topic_tokens(primary_terms)
         )
         if topic:
             for _, previous_topic in self._recent_search_topics:
                 shared_terms = topic & previous_topic
-                smaller_topic_size = min(len(topic), len(previous_topic))
+                larger_topic_size = max(len(topic), len(previous_topic))
                 if topic == previous_topic or (
                     len(shared_terms) >= 2
-                    and len(shared_terms) / smaller_topic_size >= 0.8
+                    and len(shared_terms) / larger_topic_size >= 0.8
                 ):
                     self.last_search_terms_suppression_reason = "duplicate_search_topic"
                     return False
@@ -257,16 +267,17 @@ class EventService:
         recent_context: str,
         triggering_context: str,
         now: float,
+        *, background_context: str = "",
     ) -> list[MeetingEvent]:
         """Open (or ignore) enrichment windows for thresholds crossed by a
         Jev decision. Returns events that already qualify to finalize
         immediately, e.g. the triggering text is already a full sentence."""
-        candidates: tuple[tuple[EventType, float], ...] = (
-            ("SEARCH_EXISTING_WORK", decision.search_existing_work_probability),
-            ("SUGGEST_NEW_TASK", decision.suggest_new_task_probability),
+        candidates: tuple[tuple[EventType, float, bool], ...] = (
+            ("SEARCH_EXISTING_WORK", decision.search_existing_work_probability, decision.search_confirmed),
+            ("SUGGEST_NEW_TASK", decision.suggest_new_task_probability, decision.task_confirmed),
         )
-        for event_type, probability in candidates:
-            if probability < self._thresholds[event_type]:
+        for event_type, probability, confirmed in candidates:
+            if probability < self._thresholds[event_type] and not confirmed:
                 continue
             if event_type in self._pending:
                 log_event('meeting.event.suppressed', action=event_type, confidence=probability, reason='event_already_pending')
@@ -283,8 +294,9 @@ class EventService:
                     log_event('meeting.topic.check', action=event_type, confidence=probability, reason='refinement_limit_reached')
                     is_topic_check = True
                 elif not self._can_refine(session, now):
-                    log_event('meeting.event.suppressed', action=event_type, confidence=probability, reason='refinement_cooldown')
-                    continue
+                    # Determine the topic before applying the cooldown. A
+                    # different request can arrive immediately after a search.
+                    is_topic_check = True
                 else:
                     is_refinement = True
             elif event_type == "SUGGEST_NEW_TASK":
@@ -301,13 +313,14 @@ class EventService:
                 new_word_count=len(triggering_context.split()),
                 is_refinement=is_refinement,
                 is_topic_check=is_topic_check,
+                background_context=background_context,
             )
         return self._finalize_ready(
             now, recent_context=recent_context, just_appended=triggering_context
         )
 
     def enrich(
-        self, new_text: str, recent_context: str, now: float
+        self, new_text: str, recent_context: str, now: float, *, background_context: str = ""
     ) -> list[MeetingEvent]:
         """Feed newly transcribed text into any open enrichment windows, and
         open a refinement window if it adds a retrieval clue to an active
@@ -315,6 +328,8 @@ class EventService:
         if not new_text.strip():
             return []
         for pending in self._pending.values():
+            if background_context:
+                pending.background_context = background_context
             pending.text_parts.append(new_text)
             pending.last_update_at = now
             pending.new_word_count += len(new_text.split())
@@ -334,6 +349,7 @@ class EventService:
                     text_parts=text_parts,
                     new_word_count=len(" ".join(text_parts).split()),
                     is_refinement=True,
+                    background_context=background_context,
                 )
             session.last_text = new_text
         if not self._pending:
@@ -406,6 +422,7 @@ class EventService:
                     is_refinement=pending.is_refinement,
                     previous_search_terms=previous_search_terms,
                     is_topic_check=pending.is_topic_check,
+                    background_context=pending.background_context,
                 )
             )
         return events

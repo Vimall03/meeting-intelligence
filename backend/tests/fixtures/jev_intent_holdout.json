@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "description": "Independent, entirely synthetic holdout cases for the complete decision pipeline. These examples were not used to choose the continuation wording. No customer transcript or credentials.",
+  "thresholds": {"search_existing": 0.75, "suggest_new_task": 0.75},
+  "windows": [
+    {
+      "id": "offer_to_finish",
+      "recent_context": "UNKNOWN: The accessibility labels on the settings controls still need updating.",
+      "new_context": "UNKNOWN: I can take care of that before the team review.",
+      "expected": {"search_existing": false, "suggest_new_task": true}
+    },
+    {
+      "id": "offer_deadline_tail",
+      "recent_context": "UNKNOWN: QA needs a sample invoice for their regression checks. I can put that together. Before they start testing.",
+      "new_context": "UNKNOWN: Before they start testing.",
+      "expected": {"search_existing": false, "suggest_new_task": true}
+    },
+    {
+      "id": "accept_assignment",
+      "recent_context": "UNKNOWN: Could you check whether the account import keeps the custom tags?",
+      "new_context": "UNKNOWN: Sure, I will handle it.",
+      "expected": {"search_existing": false, "suggest_new_task": true}
+    },
+    {
+      "id": "acknowledgement_without_assignment",
+      "recent_context": "UNKNOWN: The import checks were completed this morning. We are discussing why the old implementation behaved differently.",
+      "new_context": "UNKNOWN: Yes, I see what you mean.",
+      "expected": {"search_existing": false, "suggest_new_task": false}
+    },
+    {
+      "id": "withdraw_offer",
+      "recent_context": "UNKNOWN: I can check the missing audit records after this meeting.",
+      "new_context": "UNKNOWN: Actually leave that alone, security confirmed everything is there. We do not need to do anything.",
+      "expected": {"search_existing": false, "suggest_new_task": false}
+    },
+    {
+      "id": "conditional_future_offer",
+      "recent_context": "UNKNOWN: We have no plans for another region this year.",
+      "new_context": "UNKNOWN: If we ever needed another region we could look at regional caching, but we are only speculating.",
+      "expected": {"search_existing": false, "suggest_new_task": false}
+    },
+    {
+      "id": "ticket_question",
+      "recent_context": "UNKNOWN: The infrastructure group is looking at the expired certificate alerts.",
+      "new_context": "UNKNOWN: What does OPS-17 say about that?",
+      "expected": {"search_existing": true, "suggest_new_task": false}
+    },
+    {
+      "id": "implicit_runbook_mismatch",
+      "recent_context": "UNKNOWN: The on-call runbook has the pager escalation steps. You are describing a different order.",
+      "new_context": "UNKNOWN: What is the recommended order in the runbook?",
+      "expected": {"search_existing": true, "suggest_new_task": false}
+    }
+  ]
+}

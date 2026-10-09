@@ -24,6 +24,7 @@ _FIELDS = _CONTEXT_FIELDS | {
     'error_type', 'provider_error_code', 'duration_ms', 'queue_wait_ms', 'queue_depth',
     'elapsed_ms', 'search_ms', 'ranking_ms', 'attempt', 'outcome', 'reason', 'action',
     'confidence', 'refinement', 'search_probability', 'task_probability', 'cost_usd',
+    'search_confirmed', 'task_confirmed', 'waiting_for_context',
     'segment_count', 'text_chars', 'term_count', 'file_count', 'source', 'source_count',
     'error_count', 'audio_bytes', 'audio_seconds', 'audio_start_seconds', 'audio_end_seconds',
     'audio_rms', 'audio_peak', 'ack', 'resumed', 'pending_jobs', 'pending_llm',

@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     extension_origin: str = ""
     
     meeting_context_window_seconds: float = 45.0
+    meeting_background_window_seconds: float = Field(default=180.0, gt=0)
     meeting_context_turn_gap_seconds: float = 12.0
     openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
     openrouter_stt_model: str = Field(
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     jev_decisions_url: str = "https://openrouter.ai/api/alpha/decisions"
     jev_search_threshold: float = 0.75
     jev_task_threshold: float = 0.75
+    intent_review_minimum: float = Field(default=0.3, ge=0.0, le=1.0)
     jev_dedup_window_seconds: float = 90.0
     gemma_model: str = "google/gemma-4-26b-a4b-it"
     gemma_chat_completions_url: str = "https://openrouter.ai/api/v1/chat/completions"

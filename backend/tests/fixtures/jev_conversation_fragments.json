@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "description": "Entirely synthetic product meetings, authored for intent evaluation. Includes ordinary phrasing, speech fragments, reference resolution, changes of mind, and negative controls. No customer transcript or credentials.",
+  "thresholds": {"search_existing": 0.75, "suggest_new_task": 0.75},
+  "windows": [
+    {
+      "id": "implicit_signed_off_plan",
+      "recent_context": "UNKNOWN: Marketing had a launch checklist signed off last Tuesday. We cannot announce before their checks are complete.",
+      "new_context": "UNKNOWN: We need the signed-off version in front of us before we go any further.",
+      "expected": {"search_existing": true, "suggest_new_task": false}
+    },
+    {
+      "id": "implicit_prior_analysis",
+      "recent_context": "UNKNOWN: Maya compared the three hosting providers in a spreadsheet last quarter. The new quote looks much higher.",
+      "new_context": "UNKNOWN: Which figures did we use back then?",
+      "expected": {"search_existing": true, "suggest_new_task": false}
+    },
+    {
+      "id": "fragmented_retrieval",
+      "recent_context": "UNKNOWN: There was an accessibility review for the mobile app. Can somebody pull up. The review from. The February release.",
+      "new_context": "UNKNOWN: The February release.",
+      "expected": {"search_existing": true, "suggest_new_task": false}
+    },
+    {
+      "id": "fragmented_retrieval_tail",
+      "recent_context": "UNKNOWN: We wrote a retry policy for the payment gateway. I need someone to find that for me. While we are on the call.",
+      "new_context": "UNKNOWN: While we are on the call.",
+      "expected": {"search_existing": true, "suggest_new_task": false}
+    },
+    {
+      "id": "implicit_confluence_decision",
+      "recent_context": "UNKNOWN: The architecture decision record covers our session expiry policy. The mobile team wants a different timeout.",
+      "new_context": "UNKNOWN: I do not remember why we chose fifteen minutes in that decision.",
+      "expected": {"search_existing": true, "suggest_new_task": false}
+    },
+    {
+      "id": "existing_issue_status",
+      "recent_context": "UNKNOWN: We are reviewing the report exporter. Someone tracked the duplicated footer in a Jira issue last week.",
+      "new_context": "UNKNOWN: Has that footer issue moved at all?",
+      "expected": {"search_existing": true, "suggest_new_task": false}
+    },
+    {
+      "id": "explicit_retrieval_softened",
+      "recent_context": "UNKNOWN: We need to check the April retention analysis.",
+      "new_context": "UNKNOWN: Would you mind getting that report up for us?",
+      "expected": {"search_existing": true, "suggest_new_task": false}
+    },
+    {
+      "id": "changed_search_target",
+      "recent_context": "UNKNOWN: We just looked at the engineering budget. Finance keeps a separate travel budget.",
+      "new_context": "UNKNOWN: Now pull up the travel budget instead.",
+      "expected": {"search_existing": true, "suggest_new_task": false}
+    },
+    {
+      "id": "soft_investigation",
+      "recent_context": "UNKNOWN: The notification badge stays at zero until people reload the page.",
+      "new_context": "UNKNOWN: Could someone have a look at that after we finish here?",
+      "expected": {"search_existing": false, "suggest_new_task": true}
+    },
+    {
+      "id": "fragmented_investigation",
+      "recent_context": "UNKNOWN: Saving a draft sometimes erases the subject line. Could you. Take a look at. That before we ship.",
+      "new_context": "UNKNOWN: That before we ship.",
+      "expected": {"search_existing": false, "suggest_new_task": true}
+    },
+    {
+      "id": "natural_commitment",
+      "recent_context": "UNKNOWN: Customer success needs the updated pricing notes.",
+      "new_context": "UNKNOWN: Leave that with me, I will get them over this afternoon.",
+      "expected": {"search_existing": false, "suggest_new_task": true}
+    },
+    {
+      "id": "unfinished_work_reminder",
+      "recent_context": "UNKNOWN: We still need to remove the old onboarding banner. Nobody has done it yet and there is no tracking issue.",
+      "new_context": "UNKNOWN: Let us make sure somebody picks that up this week.",
+      "expected": {"search_existing": false, "suggest_new_task": true}
+    },
+    {
+      "id": "fragmented_delivery",
+      "recent_context": "UNKNOWN: Sales needs a demo tenant for the partner workshop. I can get that. Ready by Thursday.",
+      "new_context": "UNKNOWN: Ready by Thursday.",
+      "expected": {"search_existing": false, "suggest_new_task": true}
+    },
+    {
+      "id": "implied_agreed_followup",
+      "recent_context": "UNKNOWN: The beta cohort cannot see the new dashboard. We need to check their feature flags. Yes, that is the next step.",
+      "new_context": "UNKNOWN: Yes, that is the next step.",
+      "expected": {"search_existing": false, "suggest_new_task": true}
+    },
+    {
+      "id": "cancel_task_retrieve_existing",
+      "recent_context": "UNKNOWN: We thought we might need to file the double-charge bug.",
+      "new_context": "UNKNOWN: Hold on, PAY-42 already covers it. Do not make another one.",
+      "expected": {"search_existing": true, "suggest_new_task": false}
+    },
+    {
+      "id": "cancel_investigation",
+      "recent_context": "UNKNOWN: We should investigate the missing welcome email.",
+      "new_context": "UNKNOWN: Scratch that, support confirmed the user had deleted it. No follow-up needed.",
+      "expected": {"search_existing": false, "suggest_new_task": false}
+    },
+    {
+      "id": "hypothetical_future_work",
+      "recent_context": "UNKNOWN: The product currently supports English only.",
+      "new_context": "UNKNOWN: If we ever launch in Japan we could think about translation, but it is just an idea.",
+      "expected": {"search_existing": false, "suggest_new_task": false}
+    },
+    {
+      "id": "finished_work",
+      "recent_context": "UNKNOWN: Priya completed the rate limit changes yesterday.",
+      "new_context": "UNKNOWN: They are deployed and the checks passed. We can move on.",
+      "expected": {"search_existing": false, "suggest_new_task": false}
+    },
+    {
+      "id": "generic_problem",
+      "recent_context": "UNKNOWN: We are talking about how the website feels.",
+      "new_context": "UNKNOWN: It can be a bit slow sometimes, I suppose.",
+      "expected": {"search_existing": false, "suggest_new_task": false}
+    },
+    {
+      "id": "smalltalk",
+      "recent_context": "UNKNOWN: We are waiting for the last attendee.",
+      "new_context": "UNKNOWN: How is everyone doing today?",
+      "expected": {"search_existing": false, "suggest_new_task": false}
+    },
+    {
+      "id": "unresolved_reference",
+      "recent_context": "UNKNOWN: Hello, can everybody hear me?",
+      "new_context": "UNKNOWN: Can you pull that up?",
+      "expected": {"search_existing": false, "suggest_new_task": false}
+    },
+    {
+      "id": "old_request_new_topic",
+      "recent_context": "UNKNOWN: Earlier we said to get the churn report, and that was done. Now we are chatting about the company picnic.",
+      "new_context": "UNKNOWN: I hope the weather holds this Saturday.",
+      "expected": {"search_existing": false, "suggest_new_task": false}
+    }
+  ]
+}

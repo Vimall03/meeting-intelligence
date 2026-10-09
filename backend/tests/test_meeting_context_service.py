@@ -100,6 +100,63 @@ class MeetingContextServiceTests(unittest.TestCase):
 
         self.assertEqual(first_snapshot, retry_snapshot)
 
+    def test_uncertain_thought_is_joined_to_fresh_speech_and_then_consumed(self):
+        context = MeetingContextService()
+        context.add_segments([{"start": 0, "end": 3, "text": "I can get that"}])
+        first = context.prepare_jev_context()
+        context.complete_jev_evaluation(first, 0, retain_for_followup=True)
+        self.assertIsNone(context.prepare_jev_context())
+        context.add_segments([{"start": 3, "end": 6, "text": "ready by Thursday."}])
+        second = context.prepare_jev_context()
+        self.assertEqual(second.new_context, "UNKNOWN: I can get that ready by Thursday.")
+        self.assertEqual(second.latest_context, "UNKNOWN: ready by Thursday.")
+        self.assertEqual(second.segment_count, 1)
+        # An arrival while the decision runs is not accidentally consumed.
+        context.add_segments([{"start": 6, "end": 9, "text": "Next topic."}])
+        context.complete_jev_evaluation(second, 1)
+        self.assertEqual(context.prepare_jev_context().new_context, "UNKNOWN: Next topic.")
+
+    def test_continuation_memory_expires_and_survives_checkpoints(self):
+        from app.services.meeting_sessions import context_state, restore_context
+        context = MeetingContextService()
+        context.add_segments([{"start": 0, "end": 3, "text": "We could look at that"}])
+        context.complete_jev_evaluation(context.prepare_jev_context(), 0, retain_for_followup=True)
+        restored = MeetingContextService()
+        restore_context(restored, context_state(context))
+        restored.add_segments([{"start": 3, "end": 6, "text": "after the call."}])
+        self.assertIn("We could look at that", restored.prepare_jev_context().new_context)
+        context.add_segments([{"start": 18, "end": 21, "text": "Unrelated subject."}])
+        self.assertEqual(context.prepare_jev_context().new_context, "UNKNOWN: Unrelated subject.")
+
+    def test_older_referent_survives_outside_recent_window_but_background_is_bounded(self):
+        context = MeetingContextService(window_seconds=10, background_window_seconds=30)
+        context.add_segments([{"start": 0, "end": 3, "text": "Customer meetings are the goal."}])
+        context.complete_jev_evaluation(context.prepare_jev_context(), 0)
+        context.add_segments([{"start": 18, "end": 21, "text": "Get those set up."}])
+        snapshot = context.prepare_jev_context()
+        self.assertNotIn("Customer meetings", snapshot.recent_context)
+        self.assertIn("Customer meetings", snapshot.background_context)
+        self.assertEqual(snapshot.latest_context, "UNKNOWN: Get those set up.")
+        context.complete_jev_evaluation(snapshot, 1)
+        context.add_segments([{"start": 33, "end": 36, "text": "Different topic."}])
+        self.assertNotIn("Customer meetings", context.prepare_jev_context().background_context)
+
+    def test_background_restores_without_becoming_new_speech_or_crossing_contexts(self):
+        from app.services.meeting_sessions import context_state, restore_context
+        first = MeetingContextService(window_seconds=10, background_window_seconds=30)
+        first.add_segments([{"start": 0, "end": 3, "text": "First meeting private context."}])
+        first.complete_jev_evaluation(first.prepare_jev_context(), 0)
+        first.add_segments([{"start": 18, "end": 21, "text": "Current words."}])
+        first.complete_jev_evaluation(first.prepare_jev_context(), 1)
+        restored = MeetingContextService(window_seconds=10, background_window_seconds=30)
+        restore_context(restored, context_state(first))
+        self.assertIsNone(restored.prepare_jev_context())
+        self.assertIn("First meeting private context", restored.background_text())
+        separate = MeetingContextService()
+        self.assertNotIn("First meeting private context", separate.background_text())
+        restored.clear()
+        self.assertEqual(restored.background_text(), "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@ import unittest
 
 import httpx
 
-from app.services.jev_service import JevService
+from app.services.jev_service import InvalidJevDecision, JevService
 
 
 class JevServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -50,21 +50,37 @@ class JevServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.suggest_new_task_probability, 0.91)
         self.assertEqual(decision.cost, 0.00001)
 
-    async def test_defaults_missing_answers_to_zero(self) -> None:
-        service = JevService(
-            api_key="test-key",
-            transport=httpx.MockTransport(
-                lambda _request: httpx.Response(200, json={"answers": {}})
-            ),
-        )
+    async def test_incomplete_and_invalid_scores_are_rejected_instead_of_consuming_context(self) -> None:
+        answers = {
+            "should_search_existing_work": {"noul": 0.9},
+            "should_suggest_new_task": {"noul": 0.1},
+        }
+        for value in ({}, [], None, True, "0.9", float("nan"), float("inf"), -0.1, 1.1):
+            with self.subTest(value=value):
+                payload = {"answers": {}} if isinstance(value, dict) else {
+                    "answers": {**answers, "should_search_existing_work": {"noul": value}},
+                }
+                # A corrupt provider response can contain non-standard JSON numbers.
+                service = JevService(api_key="test-key", transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(200, content=json.dumps(payload))))
+                try:
+                    with self.assertRaises(InvalidJevDecision):
+                        await service.decide("Context", "New context")
+                finally:
+                    await service.close()
+
+    async def test_valid_zero_scores_are_retained(self) -> None:
+        service = JevService(api_key="test-key", transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"answers": {
+                "should_search_existing_work": {"noul": 0},
+                "should_suggest_new_task": {"noul": 0},
+            }})))
         try:
             decision = await service.decide("Context", "New context")
         finally:
             await service.close()
-
-        self.assertEqual(decision.search_existing_work_probability, 0.0)
-        self.assertEqual(decision.suggest_new_task_probability, 0.0)
-        self.assertIsNone(decision.cost)
+        self.assertEqual(decision.search_existing_work_probability, 0)
+        self.assertEqual(decision.suggest_new_task_probability, 0)
 
 
 if __name__ == "__main__":
