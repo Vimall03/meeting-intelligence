@@ -218,7 +218,9 @@ async def _meeting_stream(websocket: WebSocket):
         entries = [(secrets.token_hex(16), event) for event in events]
         if llm:
             for job_id, event in entries:
-                jobs[job_id] = {'stage': 'llm', 'event': asdict(event)}
+                jobs[job_id] = {'stage': 'llm',
+                    'event': {key: value for key, value in asdict(event).items() if key != 'background_context'},
+                    'background_context': event.background_context}
         await checkpoint()
         for job_id, event in entries:
             log_event('meeting.event', job_id=job_id, action=event.type,
@@ -259,7 +261,9 @@ async def _meeting_stream(websocket: WebSocket):
 
     for job_id, job in list(jobs.items()):
         if job['stage'] == 'llm' and llm:
-            event = MeetingEvent(**job['event'])
+            event_data = {**job['event']}
+            event_data['background_context'] = job.get('background_context', event_data.get('background_context', ''))
+            event = MeetingEvent(**event_data)
             task = asyncio.create_task(observe_operation('llm', llm.process_event(event),
                 job_id=job_id, model=settings.gemma_model, action=event.type, refinement=event.is_refinement))
             task_jobs[task] = job_id

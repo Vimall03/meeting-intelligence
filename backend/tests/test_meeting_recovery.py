@@ -55,6 +55,19 @@ def window(sequence, text):
 
 
 class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pending_context_preserves_legacy_shape_and_restores_new_background(self):
+        from app.services.event_service import EventService
+        from app.services.jev_service import JevDecision
+        from app.services.meeting_sessions import event_state, restore_events
+        service = EventService(search_threshold=.75, task_threshold=.75, dedupe_window_seconds=90)
+        service.start_pending(JevDecision(0, .9), 'Recent reference', 'Please get that', time.monotonic(),
+            background_context='Earlier concrete work')
+        state = event_state(service)
+        self.assertNotIn('background_context', state['pending']['SUGGEST_NEW_TASK'])
+        restored = EventService(search_threshold=.75, task_threshold=.75, dedupe_window_seconds=90)
+        restore_events(restored, state)
+        self.assertEqual(restored._pending['SUGGEST_NEW_TASK'].background_context, 'Earlier concrete work')
+
     def setUp(self):
         self.db = MemoryStore()
         self.a = Principal('A', 'family-A', int(time.time()) + 900)

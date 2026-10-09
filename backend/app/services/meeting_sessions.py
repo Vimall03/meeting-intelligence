@@ -124,7 +124,11 @@ def event_state(service):
     return {'offset': offset,
         'tasks': service._recent_task_triggers,
         'topics': [(at, list(topic)) for at, topic in service._recent_search_topics],
-        'pending': {k: asdict(v) for k, v in service._pending.items()},
+        # Keep the constructor payload readable by the previous release.
+        # New context lives beside it so rollback can resume the same work.
+        'pending': {k: {name: value for name, value in asdict(v).items() if name != 'background_context'}
+                    for k, v in service._pending.items()},
+        'backgrounds': {k: v.background_context for k, v in service._pending.items()},
         'search': asdict(service._search_session) if service._search_session else None}
 
 
@@ -135,6 +139,7 @@ def restore_events(service, state):
     service._recent_search_topics = [(at + delta, frozenset(topic)) for at, topic in state.get('topics', [])]
     for k, value in state.get('pending', {}).items():
         value = {**value, 'started_at': value['started_at'] + delta, 'last_update_at': value['last_update_at'] + delta}
+        value['background_context'] = state.get('backgrounds', {}).get(k, value.get('background_context', ''))
         service._pending[k] = _PendingEvent(**value)
     search = state.get('search')
     if search:
