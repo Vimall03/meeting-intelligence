@@ -1,3 +1,4 @@
+import { MinutesSettings, MinutesCard, modeLabels } from './Minutes';
 import { AuthGate } from './AuthGate';
 import { PolicyLinks } from './PolicyLinks';
 import { UiIcon } from './UiIcon';
@@ -663,11 +664,11 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
     }
   };
 
-  const stopCapture = async () => {
+  const stopCapture = async (finishMinutes = false) => {
     setBusy(true);
     setNotice(undefined);
     try {
-      const response = await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }) as { ok?: boolean; error?: string } | undefined;
+      const response = await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE', finishMinutes }) as { ok?: boolean; error?: string } | undefined;
       if (!response?.ok) setNotice({ tone: 'error', text: userError(response?.error, 'MI-CAP-005') });
     } catch (error) {
       setNotice({ tone: 'error', text: userError(error, 'MI-CAP-005') });
@@ -685,6 +686,9 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
   };
 
   const running = state.captureStatus === 'capturing' || state.captureStatus === 'connecting';
+  const currentMinutes = state.minutes?.find(item => item.captureId === state.captureSessionId);
+  const mode = running ? currentMinutes?.mode ?? state.captureMode ?? 'live_only' : state.momSettings?.mode ?? 'live_only';
+  const displayMinutes = currentMinutes ?? state.minutes?.find(item => item.roomId === meetingIdFromUrl(activeTab?.url)) ?? (!isMeetTab(activeTab) ? state.minutes?.[0] : undefined);
   const capturingHere = running && state.captureTabId === activeTab?.id;
   const capturingElsewhere = running && !capturingHere;
   const inMeeting = isMeetTab(activeTab) && state.meetingStatus === 'in-meeting';
@@ -728,7 +732,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
 
       {accountNotice}
       {capturingElsewhere && <p className="context-note">You’re listening to a meeting in another tab. Stop it here to switch meetings.</p>}
-      {state.captureStatus === 'error' && state.error
+      {state.error && state.captureStatus !== 'connecting' && state.captureStatus !== 'capturing'
         ? <div className="notice error" role="alert">{userError(state.error, 'MI-CAP-004')}</div>
         : notice && <div className={`notice ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.tone === 'error' ? userError(notice.text) : notice.text}</div>}
       {capturingHere && state.audioWarning && (
@@ -743,14 +747,14 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
         <div className="status-copy">
           <strong>{statusTitle}</strong>
           <span>{running
-            ? state.backendConnected ? 'Finding useful context and next steps' : 'Connecting…'
+            ? state.backendConnected ? mode === 'mom_only' ? 'Capturing key points for your email recap' : mode === 'both' ? 'Live assistance and your email recap are on' : 'Finding useful context and next steps' : 'Connecting…'
             : inMeeting ? 'Listen to the call and your microphone' : isMeetTab(activeTab) ? 'Join the call to start listening' : 'Live listening currently supports Google Meet. More platforms are planned.'}</span>
         </div>
       </section>
 
       {running && (
         <div className="actions">
-          <button className="stop-button" onClick={stopCapture} disabled={busy}>
+          <button className="stop-button" onClick={() => void stopCapture()} disabled={busy}>
             <span className="stop-square" aria-hidden="true" />{busy ? state.captureStatus === 'connecting' ? 'Starting…' : 'Stopping…' : 'Stop listening'}
           </button>
         </div>
@@ -765,6 +769,8 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
       </div>}
       </div>
 
+      <button className="meeting-mode-link" onClick={() => setSettingsOpen(true)} hidden={settingsOpen}><UiIcon name="settings" size={14} /><span>{modeLabels[mode]}</span><span className="mode-link-action">Change</span></button>
+      {displayMinutes && !settingsOpen && <MinutesCard meeting={displayMinutes} running={running && displayMinutes.captureId === state.captureSessionId} busy={busy} onFinish={() => void stopCapture(true)} graceSeconds={state.momSettings?.grace_seconds ?? 600} />}
       {/* Keep activity mounted so moving between views preserves task drafts and created-task links. */}
       <div className="meeting-view" hidden={settingsOpen}>
       {!running && inMeeting && microphone !== 'granted' && microphone !== 'checking' && <section className="microphone-setup">
@@ -773,7 +779,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
           {microphone === 'requesting' ? 'Waiting for permission…' : microphone === 'denied' ? 'Retry microphone access' : 'Enable microphone'}
         </button>
       </section>}
-      <section className="timeline-section" aria-labelledby="timeline-heading">
+      <section className="timeline-section" aria-labelledby="timeline-heading" hidden={mode === 'mom_only'}>
         <div className="timeline-heading">
           <div>
             <h2 id="timeline-heading">Activity</h2>
@@ -828,7 +834,8 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
       </div>
 
       <div id="capture-settings" className="settings-view settings-panel" hidden={!settingsOpen}>
-      <div className="view-heading"><h2>Settings</h2><p>Manage connections, audio and your account.</p></div>
+      <div className="view-heading"><h2>Settings</h2><p>Choose your meeting mode and manage connections.</p></div>
+      <MinutesSettings settings={state.momSettings} userId={userId} />
       <div className="settings-group"><h3 className="settings-heading">Connected accounts</h3>
       <section className="section-card drive-card" aria-live="polite">
         <div className="drive-card-topline">
@@ -927,7 +934,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
             {microphone === 'requesting' ? 'Waiting for permission…' : microphone === 'denied' ? 'Retry microphone access' : 'Enable microphone'}
           </button>
         )}
-        <p className="privacy-note">Listening continues when you close this panel. Select Stop listening to end it. Your audio is transcribed to find relevant content.</p>
+        <p className="privacy-note">Listening continues when you close this panel. Select Stop listening to end it. Your audio is transcribed for the meeting mode you choose.</p>
       </section>
       </div>
       <div className="settings-group settings-account"><h3 className="settings-heading">Your account</h3>{accountControls}</div>

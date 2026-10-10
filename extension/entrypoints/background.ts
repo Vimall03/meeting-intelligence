@@ -12,6 +12,9 @@ import {
   isGoogleDriveCallbackUrl,
 } from '../lib/config';
 
+import { parseMomSettings, momProblem, updateMomMeeting, terminalMomStates } from '../lib/mom';
+import type { MomSettings } from '../lib/mom';
+
 const OFFSCREEN_URL = 'offscreen-page.html';
 const meetingStatuses = new Map<number, ExtensionState['meetingStatus']>();
 const meetingIds = new Map<number, string>();
@@ -36,7 +39,7 @@ function initializeAuth() { return createBackgroundAuth(async () => {
   // Sign-in refresh can invoke this callback inside a queued start. Do not
   // queue behind that same start: revoked access must interrupt it now.
   await stopCapture();
-  state = { ...state, timeline: undefined, timelineOwner: undefined, captureSessionId: undefined, error: undefined };
+  state = { ...state, timeline: undefined, timelineOwner: undefined, captureSessionId: undefined, momSettings: undefined, momUserId: undefined, minutes: [], error: undefined };
   await broadcast();
   await chrome.runtime.sendMessage({ type: 'AUTH_CHANGED' }).catch(() => undefined);
 }); }
@@ -53,6 +56,10 @@ function initializeState() {
     const getSession = chrome.storage.session.get.bind(chrome.storage.session) as unknown as (key: string) => Promise<{ state?: ExtensionState }>;
     initialization = getSession('state').then(async ({ state: savedState }) => {
       if (savedState) state = savedState;
+      const principal = await auth.publicState();
+      if (!principal.signedIn || state.momUserId !== principal.userId) {
+        state = { ...state, minutes: [], momSettings: undefined, momUserId: undefined };
+      }
       // A stopped capture error describes a previous offscreen document. Do
       // not keep presenting it after an extension reload as if it just happened.
       if (state.captureStatus === 'error') {
@@ -153,6 +160,25 @@ async function checkMeetingTab(tabId: number) {
   return { connected, inMeeting: connected && meetingStatuses.get(tabId) === 'in-meeting' };
 }
 
+async function momRequest(path: string, method = 'GET', body?: string) {
+  const epoch = authEpoch;
+  const principal = await auth.publicState();
+  if (!principal.signedIn || !principal.userId) throw new Error(problem('MI-AUTH-105'));
+  const result = await backendFetch(auth, `${BACKEND_HTTP_BASE_URL}/api/mom/${path}`, method, body);
+  if (epoch !== authEpoch || principal.userId !== (await auth.publicState()).userId) throw new Error(problem('MI-AUTH-105'));
+  if (result.status !== 200) throw new Error(result.status === 401 ? problem('MI-AUTH-105') : momProblem(result.data));
+  return { data: result.data, userId: principal.userId };
+}
+
+async function loadMomSettings(mode?: string, timezone?: string): Promise<MomSettings> {
+  const result = await momRequest('settings', mode ? 'POST' : 'GET', mode ? JSON.stringify({ mode, timezone: timezone ?? 'UTC' }) : undefined);
+  const prefs = parseMomSettings(result.data);
+  if (state.momUserId !== result.userId) state = { ...state, minutes: [] };
+  state = { ...state, momSettings: prefs, momUserId: result.userId };
+  await broadcast();
+  return prefs;
+}
+
 async function prepareCapture(tabId: number) {
   await initializeState();
   if (state.captureStatus === 'capturing' || state.captureStatus === 'connecting') {
@@ -165,7 +191,7 @@ async function prepareCapture(tabId: number) {
   }
   // Refresh sign-in and load the audio page before Start is clicked. A tab
   // stream ID expires after a few seconds and must never wait on this work.
-  await Promise.all([auth.access(), ensureOffscreen()]);
+  await Promise.all([auth.access(), ensureOffscreen(), loadMomSettings()]);
   state = { ...state, meetingStatus: 'in-meeting', meetingTabId: tabId, captureStatus: 'idle', error: undefined };
   await broadcast();
   return { ok: true };
@@ -183,7 +209,7 @@ function startCapture(tabId: number) {
         return { ok: false, error: problem('MI-CAP-002'), state };
       }
       pendingCaptureTabId = tabId;
-      const [, , meeting] = await Promise.all([auth.access(), ensureOffscreen(), checkMeetingTab(tabId)]);
+      const [, , meeting, prefs] = await Promise.all([auth.access(), ensureOffscreen(), checkMeetingTab(tabId), loadMomSettings()]);
       if (epoch !== authEpoch) throw new Error(problem('MI-AUTH-105'));
       if (cancellation !== captureCancellation) return { ok: false, error: problem('MI-CAP-006'), state };
       if (!meeting.inMeeting) throw new Error(problem('MI-CAP-001'));
@@ -205,11 +231,11 @@ function startCapture(tabId: number) {
         });
       });
       const captureSessionId = crypto.randomUUID();
-      state = { ...state, meetingStatus: 'in-meeting', meetingTabId: tabId, captureTabId: tabId, captureSessionId, captureStatus: 'connecting', backendConnected: false, timeline: undefined, audioWarning: undefined, timelineOwner: { tabId, meetingId }, error: undefined };
+      state = { ...state, meetingStatus: 'in-meeting', meetingTabId: tabId, captureTabId: tabId, captureSessionId, captureMode: prefs.mode, captureStatus: 'connecting', backendConnected: false, timeline: undefined, audioWarning: undefined, timelineOwner: { tabId, meetingId }, error: undefined };
       void broadcast();
       if (epoch !== authEpoch) throw new Error(problem('MI-AUTH-105'));
       if (cancellation !== captureCancellation) return { ok: false, error: problem('MI-CAP-006'), state };
-      const result = await chrome.runtime.sendMessage({ type: 'START_OFFSCREEN', streamId, captureSessionId }) as { ok?: boolean; error?: string } | undefined;
+      const result = await chrome.runtime.sendMessage({ type: 'START_OFFSCREEN', streamId, captureSessionId, roomId: meetingId, userId: state.momUserId, mode: prefs.mode }) as { ok?: boolean; error?: string } | undefined;
       if (!result?.ok) {
         if (state.captureStatus === 'idle') return { ok: false, error: problem('MI-CAP-006'), state };
         if (state.captureStatus !== 'error') {
@@ -251,6 +277,31 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
       return { ok: true, ticket: result.data.ticket };
     }
     return { ok: false };
+  }
+  if (message.type.startsWith('MOM_')) {
+    if (!trusted(sender)) return { ok: false, error: problem('MI-AUTH-106') };
+    await initializeState();
+    if (message.type === 'MOM_SETTINGS') return { ok: true, settings: await loadMomSettings(message.mode, message.timezone) };
+    if (message.type === 'MOM_UPDATE') {
+      if (!sender.url?.endsWith('/offscreen-page.html') || message.userId !== (await auth.publicState()).userId) return { ok: false };
+      const known = state.minutes?.find(item => item.sessionId === message.meeting.sessionId);
+      if (known && terminalMomStates.includes(known.state)) return { ok: true };
+      if (known && known.captureId === state.captureSessionId && message.meeting.captureId !== known.captureId) return { ok: true };
+      if (known && known.captureId === message.meeting.captureId && known.state !== 'active' && message.meeting.state === 'active') return { ok: true };
+      state = { ...state, momUserId: message.userId, minutes: updateMomMeeting(state.minutes ?? [], message.meeting) };
+      await broadcast();
+      return { ok: true };
+    }
+    if (message.type === 'MOM_STATUS' || message.type === 'MOM_FINISH' || message.type === 'MOM_RETRY') {
+      if (!/^[a-f0-9]{32}$/.test(message.sessionId)) throw new Error(problem('MI-MOM-005'));
+      const suffix = message.type === 'MOM_FINISH' ? '/finish' : message.type === 'MOM_RETRY' ? '/retry' : '';
+      const result = await momRequest(`sessions/${message.sessionId}${suffix}`, suffix ? 'POST' : 'GET');
+      const data = result.data;
+      const prior = state.minutes?.find(item => item.sessionId === message.sessionId);
+      if (prior) state = { ...state, minutes: updateMomMeeting(state.minutes ?? [], { ...prior, state: data.state, finalizeAfter: data.finalize_after ?? undefined, supportCode: data.support_code }) };
+      await broadcast();
+      return { ok: true, status: data };
+    }
   }
   if (message.type === 'START_CAPTURE') return startCapture(sender.tab?.id ?? message.tabId);
   if (message.type === 'MIC_PERMISSION_RESULT') {
@@ -314,7 +365,7 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
   } else if (message.type === 'PREPARE_CAPTURE') {
     return enqueue(() => prepareCapture(sender.tab?.id ?? message.tabId));
   } else if (message.type === 'STOP_CAPTURE') {
-    await requestStopCapture();
+    await requestStopCapture(message.finishMinutes);
     return { ok: true, state };
   } else if (message.type === 'CAPTURE_STATE') {
     if (!trusted(sender) || !sender.url?.endsWith('/offscreen-page.html')) return { ok: false };
@@ -340,10 +391,10 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
   return true;
 });
 
-async function stopCapture() {
-  const result = await chrome.runtime.sendMessage({ type: 'STOP_OFFSCREEN' }).catch(() => undefined) as { ok?: boolean } | undefined;
+async function stopCapture(finishMinutes = false) {
+  const result = await chrome.runtime.sendMessage({ type: 'STOP_OFFSCREEN', finishMinutes }).catch(() => undefined) as { ok?: boolean; warning?: string } | undefined;
   if (result && !result.ok) throw new Error(problem('MI-CAP-005'));
-  state = { ...state, captureStatus: 'idle', captureTabId: undefined, captureSessionId: undefined, backendConnected: false, error: undefined };
+  state = { ...state, captureStatus: 'idle', captureTabId: undefined, captureSessionId: undefined, backendConnected: false, error: result?.warning ? userError(result.warning, 'MI-MOM-003') : undefined };
   await broadcast();
 }
 
@@ -353,9 +404,9 @@ function enqueue<T>(operation: () => Promise<T>): Promise<T> {
   return next;
 }
 
-function requestStopCapture() {
+function requestStopCapture(finishMinutes = false) {
   captureCancellation++;
-  return enqueue(stopCapture);
+  return enqueue(() => stopCapture(finishMinutes));
 }
 
 async function handleTabRemoved(tabId: number) {

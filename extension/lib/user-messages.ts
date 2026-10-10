@@ -3,6 +3,17 @@
  * logs; never pass provider messages directly to the interface.
  */
 export const userMessages = {
+  'MI-MOM-001': 'We couldn’t load meeting recap settings. Try again in a moment.',
+  'MI-MOM-002': 'We couldn’t save that meeting mode. Try again.',
+  'MI-MOM-003': 'We couldn’t finish the captured audio. Your recap may miss the last part of the meeting.',
+  'MI-MOM-004': 'The meeting is still wrapping up. Wait a moment, then try again.',
+  'MI-MOM-005': 'This meeting recap is no longer available.',
+  'MI-MOM-006': 'We couldn’t confirm recap delivery. Check your inbox; we won’t send another copy automatically.',
+  'MI-MOM-007': 'This meeting reached the recap limit. Try a shorter recording next time.',
+  'MI-MOM-008': 'Confirm your signed-in email before enabling meeting recaps.',
+  'MI-MOM-009': 'Temporary meeting content is still being cleared. We’ll try again automatically.',
+  'MI-MOM-010': 'We couldn’t prepare this recap. Try again if a retry is available.',
+  'MI-MOM-011': 'We couldn’t send this recap. Try again if a retry is available.',
   'MI-APP-001': 'Something went wrong. Try again. If it keeps happening, share this code with support.',
   'MI-APP-002': 'We couldn’t update this meeting. Refresh the meeting tab and try again.',
   'MI-APP-003': 'We couldn’t close this panel. Use the close button in your browser’s side panel.',

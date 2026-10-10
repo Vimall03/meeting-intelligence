@@ -56,3 +56,30 @@ Use `lib/user-messages.ts` for every new error and recovery notice. Add a stable
 Meeting Intelligence is positioned as an assistant for online meetings. Live listening currently works in Google Meet; other platforms are planned. Keep platform-specific guidance where it affects what users can do. Do not advertise other platforms as supported until their capture adapters exist.
 
 Code areas: `APP` panel requests, `CAP` capture lifecycle, `CON` service connections, `MIC` microphone access/recovery, `DRV` Drive sign-in/search, `ATL` Jira/Confluence sign-in, `JIR` task creation, and `AUTH` account permissions. These codes remain stable when wording changes.
+
+## Meeting recaps (0.1.11)
+
+Settings offers **Live assistance** (default, recaps off), **Recap only**, and
+**Live assistance + recap**. Preferences are user-scoped and fetched before
+minting the short-lived tab stream ID. They do not open the microphone. The
+server pins the mode for a recap session, including rejoins; the UI keeps an
+active capture's mode separate from preferences for the next new meeting.
+
+Capture UUID, Google Meet room code, and server recap session ID are separate.
+Socket renewal/reconnect keeps the same microphone and capture UUID, replays
+only unacknowledged audio, and includes the server recap ID. A new listening
+segment in the same room can resume its recap during the ten-minute grace.
+
+**Stop listening** immediately releases input hardware, drains a final bounded
+recording window, and sends `end`. **Finish & email recap** uses `finish` after
+the same drain. The retired drain uses local references and cannot mutate a
+new capture. It waits up to 35 seconds for the exact final sequence acknowledgment;
+an unavailable connection or missing final blob produces MI-MOM-003. Server
+status remains authoritative, including when email delivery is uncertain.
+Only metadata is retained for up to eight recap sessions; transcripts and audio
+are not stored by this feature in browser storage. Sign-out clears this metadata.
+
+The production package preserves its existing public manifest key. Preserve
+that key and the installed folder when updating to retain the extension ID,
+sign-in and microphone permission. If Reload stalls, use Load unpacked on the
+same folder without removing the existing entry.

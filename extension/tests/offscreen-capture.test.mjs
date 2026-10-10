@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 
-function harness({ failInitialName, failReplacementName, permissionState = 'prompt', deferReplacement = false, deferFirstClose = false, deferFirstRecorderStop = false, acknowledge = true, clock = { now: Date.now() } } = {}) {
+function harness({ failInitialName, failReplacementName, permissionState = 'prompt', deferReplacement = false, deferFirstClose = false, deferFirstRecorderStop = false, acknowledge = true, momMode, autoEnd = true, clock = { now: Date.now() } } = {}) {
   const messages = [], timeouts = new Map(), intervals = new Map(), sockets = [], recorders = [], contexts = [];
   let listener, timer = 0, serverAck = 0;
   class Clock extends Date { static now() { return clock.now; } }
@@ -25,7 +25,11 @@ function harness({ failInitialName, failReplacementName, permissionState = 'prom
     send(value) {
       if (typeof value === 'string') {
         const control = JSON.parse(value); this.controls.push(control);
-        if (control.type === 'authenticate') queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'auth_ready', ack: serverAck, expiresAt: Math.floor(Date.now() / 1000) + 900, expiresIn: 900 }) }));
+        if (control.type === 'authenticate') queueMicrotask(() => {
+          this.onmessage?.({ data: JSON.stringify({ type: 'auth_ready', ack: serverAck, expiresAt: Math.floor(Date.now() / 1000) + 900, expiresIn: 900 }) });
+          if (momMode) this.onmessage?.({ data: JSON.stringify({ type: 'mom_session', sessionId: 'a'.repeat(32), mode: momMode, graceSeconds: 600 }) });
+        });
+        if (autoEnd && ['end', 'finish'].includes(control.type)) queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'meeting_segment_ended', ack: control.lastSequence, minutesFinalizing: control.type === 'finish' }) }));
         if (control.type === 'audio') this.sequence = control.sequence;
         if (control.type === 'ping') this.onmessage?.({ data: JSON.stringify({ type: 'pong' }) });
       } else {
@@ -87,6 +91,7 @@ function harness({ failInitialName, failReplacementName, permissionState = 'prom
     health() { for (const {callback, delay} of intervals.values()) if (delay !== 15000) callback(); },
     heartbeat() { for (const {callback, delay} of intervals.values()) if (delay === 15000) callback(); },
     async reconnect() { const [id, {callback}] = [...timeouts.entries()].find(([, task]) => task.delay >= 1000 && task.delay < 2000); timeouts.delete(id); callback(); await new Promise(resolve => setImmediate(resolve)); sockets.at(-1).onopen(); await new Promise(resolve => setImmediate(resolve)); },
+    timeout(delay) { const [id, task] = [...timeouts.entries()].find(([, task]) => task.delay === delay); timeouts.delete(id); task.callback(); },
     tab,
     clock,
     timeouts,
@@ -467,4 +472,83 @@ test('recovery deadline ends capture with a clear notice rather than retrying in
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.microphone.getTracks()[0].readyState, 'ended');
   assert.match(h.messages.find(message => message.state?.error?.includes('MI-CON-005')).state.error, /MI-CON-005/);
+});
+
+
+test('MOM sends room identity separately and drains the final blob before finish acknowledgment', async () => {
+  const h = harness({ momMode: 'both' });
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'capture', roomId: 'abc-defg-hij', userId: 'user', mode: 'both' });
+  const socket = h.sockets[0];
+  assert.equal(socket.controls[0].meetingId, 'capture');
+  assert.equal(socket.controls[0].roomId, 'abc-defg-hij');
+  h.window();
+  const stopped = h.send({ type: 'STOP_OFFSCREEN', finishMinutes: true });
+  assert.equal(h.microphone.getTracks()[0].readyState, 'ended');
+  assert.equal(h.tab.getTracks()[0].readyState, 'ended');
+  assert.equal((await stopped).warning, undefined);
+  assert.equal(socket.sent.length, 2);
+  assert.equal(socket.controls.at(-1).type, 'finish');
+  assert.equal(socket.controls.at(-1).lastSequence, 2);
+  assert.equal(socket.readyState, 3);
+  assert.equal(h.messages.filter(m => m.type === 'MOM_UPDATE').at(-1).meeting.state, 'ready');
+  assert.equal(h.timeouts.size, 0);
+  assert.equal(h.intervals.size, 0);
+});
+
+test('MOM ordinary stop starts rejoin grace and does not finish minutes', async () => {
+  const h = harness({ momMode: 'mom_only' });
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'capture', roomId: 'abc-defg-hij', userId: 'user', mode: 'mom_only' });
+  await h.send({ type: 'STOP_OFFSCREEN' });
+  assert.equal(h.sockets[0].controls.at(-1).type, 'end');
+  assert.equal(h.messages.filter(m => m.type === 'MOM_UPDATE').at(-1).meeting.state, 'active');
+  assert.equal(h.messages.some(m => m.type === 'MICROPHONE_PERMISSION_STATUS' && !m.granted), false);
+});
+
+test('MOM reconnect keeps microphone and capture ID while sending the server resume ID', async () => {
+  const h = harness({ momMode: 'both', acknowledge: false });
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'capture', roomId: 'abc-defg-hij', userId: 'user', mode: 'both' });
+  h.window();
+  h.sockets[0].onclose({ code: 1012 });
+  await h.reconnect();
+  assert.equal(h.sockets[1].controls[0].momSessionId, 'a'.repeat(32));
+  assert.equal(h.sockets[1].controls[0].meetingId, 'capture');
+  assert.equal(h.sockets[1].sent.length, 1);
+  assert.equal(h.micRequests, 1);
+  await h.send({ type: 'STOP_OFFSCREEN' });
+});
+
+test('MOM drain timeout releases hardware immediately and reports incomplete tail', async () => {
+  const h = harness({ momMode: 'both', autoEnd: false });
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'capture', roomId: 'abc-defg-hij', userId: 'user', mode: 'both' });
+  const stopped = h.send({ type: 'STOP_OFFSCREEN', finishMinutes: true });
+  assert.equal(h.microphone.getTracks()[0].readyState, 'ended');
+  assert.equal(h.tab.getTracks()[0].readyState, 'ended');
+  await new Promise(resolve => setImmediate(resolve));
+  h.timeout(35000);
+  assert.match((await stopped).warning, /MI-MOM-003/);
+  assert.equal(h.sockets[0].readyState, 3);
+  assert.equal(h.intervals.size, 0);
+});
+
+test('late MOM drain completion cannot close the microphone or socket of a new capture', async () => {
+  const h = harness({ momMode: 'both', autoEnd: false });
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'first', roomId: 'abc-defg-hij', userId: 'user', mode: 'both' });
+  const stopped = h.send({ type: 'STOP_OFFSCREEN' });
+  await new Promise(resolve => setImmediate(resolve));
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'second', roomId: 'abc-defg-hij', userId: 'user', mode: 'both' });
+  h.sockets[0].onmessage({ data: JSON.stringify({ type: 'meeting_segment_ended', ack: 1, minutesFinalizing: false }) });
+  await stopped;
+  assert.equal(h.acquiredMicrophones.at(-1).getTracks()[0].readyState, 'live');
+  assert.equal(h.sockets[1].readyState, 1);
+  const secondStop = h.send({ type: 'STOP_OFFSCREEN' });
+  await new Promise(resolve => setImmediate(resolve));
+  h.timeout(35000); await secondStop;
+});
+
+test('live-only stop never sends a MOM finalization or persists minutes metadata', async () => {
+  const h = harness();
+  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'capture', roomId: 'abc-defg-hij', userId: 'user' });
+  await h.send({ type: 'STOP_OFFSCREEN', finishMinutes: true });
+  assert.equal(h.sockets[0].controls.some(m => ['end', 'finish'].includes(m.type)), false);
+  assert.equal(h.messages.some(m => m.type === 'MOM_UPDATE'), false);
 });

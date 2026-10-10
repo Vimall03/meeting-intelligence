@@ -6,10 +6,11 @@ import ts from 'typescript';
 import * as userMessages from '../lib/user-messages.ts';
 import * as meetings from '../lib/meeting-session.ts';
 import * as permissions from '../lib/microphone-permission.ts';
+import * as mom from '../lib/mom.ts';
 import * as recovery from '../lib/content-script-recovery.ts';
 
-function harness({ deferAccess = false, invocationDenied = false, savedState, activeOffscreen = false, expireAccess = false } = {}) {
-  const calls = [], local = {}, session = savedState ? { state: savedState } : {};
+function harness({ deferAccess = false, invocationDenied = false, savedState, activeOffscreen = false, expireAccess = false, momMode = 'live_only', momFailure = false, userId = 'user' } = {}) {
+  const calls = [], requests = [], local = {}, session = savedState ? { state: savedState } : {};
   let listener, signedOut, releaseAccess, active = activeOffscreen, offscreenExists = activeOffscreen;
   let clock = 0, issuedAt = 0, streams = 0, uuid = 0;
   let meetingStatus = 'in-meeting';
@@ -65,7 +66,7 @@ function harness({ deferAccess = false, invocationDenied = false, savedState, ac
     new Promise(resolve => listener(message, sender, resolve));
   const source = fs.readFileSync(new URL('../entrypoints/background.ts', import.meta.url), 'utf8');
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
-    exports: {}, chrome, URL, Response, setTimeout,
+    exports: {}, chrome, URL, Response, setTimeout, Error,
     crypto: { randomUUID: () => `capture-${++uuid}` },
     defineBackground: callback => callback(),
     require(name) {
@@ -73,7 +74,13 @@ function harness({ deferAccess = false, invocationDenied = false, savedState, ac
       if (name.includes('meeting-session')) return meetings;
       if (name.includes('microphone-permission')) return permissions;
       if (name.includes('content-script-recovery')) return recovery;
+      if (name.endsWith('/mom')) return mom;
       if (name.includes('background-auth')) return {
+        async backendFetch(_auth, url, method, body) {
+          calls.push('mom:settings'); clock += 1000; requests.push({url,method,body});
+          if (momFailure) return { status: 503, data: { detail: {support_code:'MI-MOM-001',message:'provider-secret'} } };
+          return { status: 200, data: url.includes('/sessions/') ? {state:'sent'} : { ...mom.defaultMomSettings, mode: body ? JSON.parse(body).mode : momMode, minutes_available: true } };
+        },
         createBackgroundAuth(callback) {
           signedOut = callback;
           return {
@@ -83,14 +90,14 @@ function harness({ deferAccess = false, invocationDenied = false, savedState, ac
               if (expireAccess) { await signedOut(); throw new Error(userMessages.problem('MI-AUTH-105')); }
               clock += 5000; calls.push('auth:ready'); return 'access';
             },
-            async publicState() { return { authenticated: true, userId: 'user' }; },
+            async publicState() { return { signedIn: true, userId }; },
           };
         },
       };
       return { BACKEND_HTTP_BASE_URL: 'https://example.com', isGoogleDriveCallbackUrl: () => false };
     },
   });
-  return { send, calls, local, releaseAccess, signOut: () => signedOut(), state: () => session.state,
+  return { send, calls, requests, local, releaseAccess, signOut: () => signedOut(), state: () => session.state,
     closeTab: id => chrome.tabs.onRemoved.fire(id), navigateTab: (id, url) => chrome.tabs.onUpdated.fire(id, { url }, {}),
     leaveMeeting: () => { meetingStatus = 'not-in-meeting'; },
     get streams() { return streams; }, get active() { return active; } };
@@ -206,4 +213,71 @@ test('a failed permission request preserves remembered access unless the browser
   assert.equal(h.local[permissions.MICROPHONE_PERMISSION_KEY], true);
   await h.send({ type: 'MIC_PERMISSION_RESULT', granted: false, errorName: 'NotAllowedError', permissionState: 'denied' });
   assert.equal(h.local[permissions.MICROPHONE_PERMISSION_KEY], false);
+});
+
+
+test('meeting preferences finish loading before stream minting for all three modes', async () => {
+  for (const mode of ['live_only', 'mom_only', 'both']) {
+    const h = harness({ momMode: mode });
+    assert.equal((await h.send(start)).ok, true);
+    assert.ok(h.calls.indexOf('mom:settings') < h.calls.indexOf('mint:7'));
+    assert.equal(h.state().momSettings.mode, mode);
+    await h.send(stop);
+  }
+});
+
+test('saving a meeting mode never requests audio or clears the microphone grant', async () => {
+  const h = harness();
+  const reply = await h.send({type:'MOM_SETTINGS',mode:'mom_only',timezone:'Asia/Kolkata'});
+  assert.equal(reply.ok, true);
+  assert.equal(h.streams, 0);
+  assert.equal(h.active, false);
+  assert.deepEqual(h.local, {});
+  assert.equal(JSON.parse(h.requests[0].body).timezone, 'Asia/Kolkata');
+});
+
+test('unavailable preferences fail before capturing audio and never expose raw service errors', async () => {
+  const h = harness({ momFailure: true });
+  const reply = await h.send(start);
+  assert.equal(reply.ok, false);
+  assert.match(reply.error, /MI-MOM-001/);
+  assert.doesNotMatch(reply.error, /provider-secret/);
+  assert.equal(h.streams, 0);
+});
+
+test('MOM metadata is fenced by user and old draining captures cannot replace the active rejoin', async () => {
+  const h = harness({ momMode:'both' });
+  await h.send(start);
+  const sender={id:'extension',url:'chrome-extension://extension/offscreen-page.html'};
+  const meeting={sessionId:'a'.repeat(32),roomId:'abc-defg-hij',captureId:h.state().captureSessionId,mode:'both',state:'active'};
+  await h.send({type:'MOM_UPDATE',userId:'another-user',meeting},sender);
+  assert.equal(h.state().minutes.length, 0);
+  await h.send({type:'MOM_UPDATE',userId:'user',meeting},sender);
+  await h.send({type:'MOM_UPDATE',userId:'user',meeting:{...meeting,captureId:'old-capture'}},sender);
+  assert.equal(h.state().minutes[0].captureId, meeting.captureId);
+  await h.send({type:'MOM_STATUS',sessionId:meeting.sessionId});
+  assert.equal(h.state().minutes[0].state, 'sent');
+  await h.send({type:'MOM_UPDATE',userId:'user',meeting},sender);
+  assert.equal(h.state().minutes[0].state, 'sent');
+  await h.signOut();
+  assert.equal(h.state().minutes.length, 0);
+  assert.equal(h.state().momSettings, undefined);
+});
+
+test('service-worker recovery drops recap metadata owned by another signed-in user', async () => {
+  const h = harness({ savedState: { meetingStatus:'unknown',captureStatus:'idle',backendConnected:false,momUserId:'other',momSettings:{mode:'both'},minutes:[{sessionId:'a'.repeat(32)}] } });
+  const state = await h.send({type:'GET_STATE'});
+  assert.equal(state.minutes.length, 0);
+  assert.equal(state.momSettings, undefined);
+});
+
+test('changing preferences during capture preserves the active meeting mode', async () => {
+  const h = harness({ momMode:'live_only' });
+  await h.send(start);
+  await h.send({type:'MOM_SETTINGS',mode:'mom_only',timezone:'UTC'});
+  assert.equal(h.state().momSettings.mode,'mom_only');
+  assert.equal(h.state().captureMode,'live_only');
+  assert.equal(h.active,true);
+  assert.equal(h.streams,1);
+  await h.send(stop);
 });

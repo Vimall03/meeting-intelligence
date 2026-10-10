@@ -1,5 +1,6 @@
 import { problem, userError, microphoneProblem } from '../lib/user-messages';
 import { AUDIO_MIME_TYPE, AUDIO_WINDOW_MS, MEETING_SOCKET_URL } from '../lib/config';
+import type { MomMode, MomMeeting } from '../lib/mom';
 import { isTimelineSnapshot } from '../lib/timeline';
 
 let recorder: MediaRecorder | undefined;
@@ -18,6 +19,11 @@ let stopping = false;
 let captureGeneration = 0;
 let captureSessionId: string | undefined;
 let startPending = false;
+let roomId: string | undefined;
+let captureUserId: string | undefined;
+let captureMode: MomMode = 'live_only';
+let minutesSession: MomMeeting | undefined;
+let minutesGrace = 600;
 let authTimer: ReturnType<typeof setTimeout> | undefined;
 let socketAuthorized = false;
 let authorizedUntil = 0;
@@ -87,7 +93,7 @@ async function connectSocket(generation: number) {
   authTimer = setTimeout(handshakeTimeout, 10_000);
   sessionSocket.onopen = () => {
     if (socket !== sessionSocket || stopping) return;
-    sessionSocket.send(JSON.stringify({ type: 'authenticate', ticket: authorization.ticket, meetingId: captureSessionId, lastAck: acknowledgedSequence }));
+    sessionSocket.send(JSON.stringify({ type: 'authenticate', ticket: authorization.ticket, meetingId: captureSessionId, roomId, momSessionId: minutesSession?.sessionId, lastAck: acknowledgedSequence }));
   };
   sessionSocket.onerror = () => retryConnection(sessionSocket, generation);
   sessionSocket.onclose = event => {
@@ -131,6 +137,11 @@ async function connectSocket(generation: number) {
         acknowledgedSequence = message.sequence;
         audioQueue = audioQueue.filter(window => window.sequence > acknowledgedSequence);
         flushAudio();
+      } else if (socketAuthorized && message.type === 'mom_session' && /^[a-f0-9]{32}$/.test(message.sessionId)
+        && ['mom_only', 'both'].includes(message.mode) && roomId && captureSessionId) {
+        minutesGrace = Number.isFinite(message.graceSeconds) ? message.graceSeconds : 600;
+        minutesSession = { sessionId: message.sessionId, roomId, captureId: captureSessionId, mode: message.mode, state: 'active' };
+        publishMinutes(minutesSession, captureUserId);
       } else if (socketAuthorized && isTimelineSnapshot(message)) notify({ timeline: message });
     } catch {
       // Ignore malformed or unrelated messages; heartbeat detects a stalled peer.
@@ -173,7 +184,7 @@ function startRecordingWindow(activeRecorder: MediaRecorder) {
   }, AUDIO_WINDOW_MS);
 }
 
-async function start(streamId: string, sessionId: string) {
+async function start(streamId: string, sessionId: string, room?: string, userId?: string, mode: MomMode = 'live_only') {
   // A tabCapture stream ID can be consumed in this extension offscreen page.
   // Request audio alone: no tab video or display-capture permission is used.
   const selection = navigator.mediaDevices.getUserMedia({
@@ -195,6 +206,10 @@ async function start(streamId: string, sessionId: string) {
   }
   stopping = false;
   captureSessionId = sessionId;
+  roomId = room;
+  captureUserId = userId;
+  captureMode = mode;
+  minutesSession = undefined;
   const selectedTab = await selection.catch((error) => {
     assertCurrent(generation);
     throw error;
@@ -446,7 +461,86 @@ async function start(streamId: string, sessionId: string) {
   startRecordingWindow(activeRecorder);
 }
 
-async function stop() {
+function publishMinutes(meeting: MomMeeting, userId: string | undefined) {
+  if (userId) chrome.runtime.sendMessage({ type: 'MOM_UPDATE', userId, meeting }).catch(() => undefined);
+}
+
+// Drain owns only the retired capture references. It cannot touch a new mic,
+// recorder, socket, queue, sequence counter or CAPTURE_STATE notification.
+function drainMinutes(activeSocket: WebSocket | undefined, activeRecorder: MediaRecorder | undefined,
+  queue: { sequence: number; data: Blob }[], sequence: number, sent: number, authorized: boolean,
+  finishMinutes: boolean): Promise<boolean> {
+  if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || !authorized) return Promise.resolve(false);
+  return new Promise(resolve => {
+    let ended = false, recorderDone = !activeRecorder, controlSent = false;
+    let pumpTimer: ReturnType<typeof setInterval> | undefined;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let recorderDeadline: ReturnType<typeof setTimeout> | undefined;
+    const complete = (ok: boolean) => {
+      if (ended) return;
+      ended = true;
+      if (pumpTimer) clearInterval(pumpTimer);
+      if (deadline) clearTimeout(deadline);
+      if (recorderDeadline) clearTimeout(recorderDeadline);
+      if (activeRecorder) { activeRecorder.ondataavailable = null; activeRecorder.onstop = null; activeRecorder.onerror = null; }
+      activeSocket.onmessage = null;
+      activeSocket.onclose = null;
+      activeSocket.onerror = null;
+      resolve(ok);
+    };
+    const pump = () => {
+      if (ended || !recorderDone) return;
+      try {
+        if (activeSocket.readyState !== WebSocket.OPEN) { complete(false); return; }
+        for (const window of queue) {
+          if (window.sequence <= sent) continue;
+          if ((activeSocket.bufferedAmount || 0) > 4_000_000) return;
+          activeSocket.send(JSON.stringify({ type: 'audio', sequence: window.sequence }));
+          activeSocket.send(window.data);
+          sent = window.sequence;
+        }
+        if (!controlSent && sent === sequence) {
+          controlSent = true;
+          activeSocket.send(JSON.stringify({ type: finishMinutes ? 'finish' : 'end', lastSequence: sequence }));
+        }
+      } catch { complete(false); }
+    };
+    activeSocket.onmessage = event => {
+      if (typeof event.data !== 'string') return;
+      try {
+        const message = JSON.parse(event.data);
+        if (controlSent && message.type === 'meeting_segment_ended' && message.ack === sequence
+          && message.minutesFinalizing === finishMinutes) complete(true);
+      } catch { /* Only an exact segment acknowledgment completes the drain. */ }
+    };
+    activeSocket.onclose = activeSocket.onerror = () => complete(false);
+    deadline = setTimeout(() => complete(false), 35_000);
+    pumpTimer = setInterval(pump, 100);
+    if (activeRecorder) {
+      activeRecorder.ondataavailable = event => {
+        if (ended || !event.data.size) return;
+        if (event.data.size > 2_000_000 || queue.length >= 20 || queue.reduce((size, item) => size + item.data.size, 0) + event.data.size > 12_000_000) { complete(false); return; }
+        queue.push({ sequence: ++sequence, data: event.data });
+      };
+      activeRecorder.onstop = () => { recorderDone = true; if (recorderDeadline) clearTimeout(recorderDeadline); pump(); };
+      activeRecorder.onerror = () => complete(false);
+      // An inactive recorder can still have its last data/stop events queued.
+      recorderDeadline = setTimeout(() => complete(false), 1500);
+    } else pump();
+  });
+}
+
+async function stop(finishMinutes = false): Promise<{ warning?: string }> {
+  const retiringMinutes = minutesSession;
+  const retiringUser = captureUserId;
+  const retiringGrace = minutesGrace;
+  const needsMinutes = captureMode !== 'live_only' || !!retiringMinutes;
+  const wasAuthorized = socketAuthorized;
+  const pendingAudio = audioQueue.slice();
+  const finalSequence = audioSequence;
+  const lastSent = sentThrough;
+  minutesSession = undefined;
+  captureMode = 'live_only';
   captureGeneration += 1;
   stopping = true;
   socketAuthorized = false;
@@ -483,11 +577,15 @@ async function stop() {
   tabGain = microphoneGain = undefined;
   retryMicrophoneCapture = undefined;
 
+  const drained = needsMinutes && retiringMinutes
+    ? drainMinutes(activeSocket, activeRecorder, pendingAudio, finalSequence, lastSent, wasAuthorized, finishMinutes)
+    : undefined;
+
   // Release the selected tab and mic before waiting for MediaRecorder to stop.
   activeRecordingStream?.getTracks().forEach((track) => track.stop());
   activeTabStream?.getTracks().forEach((track) => track.stop());
   activeMicrophoneStream?.getTracks().forEach((track) => track.stop());
-  activeSocket?.close();
+  if (!drained) activeSocket?.close();
   activeTabSource?.disconnect();
   activeMicrophoneSource?.disconnect();
   activeTabGain?.disconnect();
@@ -512,14 +610,20 @@ async function stop() {
     }
     await recorderStopped;
   }
+  // Close the mixer independently of network processing; hardware is already off.
   try { await activeAudioContext?.close(); } catch { /* Context may already be closed. */ }
+  const complete = drained ? await drained : !needsMinutes;
+  activeSocket?.close();
+  if (retiringMinutes) publishMinutes({ ...retiringMinutes, state: complete && finishMinutes ? 'ready' : 'active',
+    finalizeAfter: Math.floor(Date.now() / 1000) + retiringGrace, supportCode: complete ? undefined : 'MI-MOM-003' }, retiringUser);
+  return complete ? {} : { warning: problem('MI-MOM-003') };
 }
 
 function notify(state: Record<string, unknown>) {
   chrome.runtime.sendMessage({ type: 'CAPTURE_STATE', captureSessionId, state }).catch(() => undefined);
 }
 
-chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string; captureSessionId?: string; granted?: boolean }, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string; captureSessionId?: string; granted?: boolean; roomId?: string; userId?: string; mode?: MomMode; finishMinutes?: boolean }, _sender, sendResponse) => {
   if (message.type === 'MIC_PERMISSION_RESULT' && message.granted
     && _sender.url === chrome.runtime.getURL('mic-permission.html')) {
     retryMicrophoneCapture?.();
@@ -540,7 +644,7 @@ chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string
       return false;
     }
     startPending = true;
-    start(message.streamId, message.captureSessionId)
+    start(message.streamId, message.captureSessionId, message.roomId, message.userId, message.mode)
       .then(() => sendResponse({ ok: true }))
       .catch(async (error: unknown) => {
         const description = describeCaptureError(error);
@@ -553,7 +657,7 @@ chrome.runtime.onMessage.addListener((message: { type: string; streamId?: string
     return true;
   }
   if (message.type === 'STOP_OFFSCREEN') {
-    stop().then(() => sendResponse({ ok: true }));
+    stop(message.finishMinutes).then(result => sendResponse({ ok: true, ...result }));
     return true;
   }
 });
