@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     gemma_model: str = "google/gemma-4-26b-a4b-it"
     gemma_chat_completions_url: str = "https://openrouter.ai/api/v1/chat/completions"
 
+    # Backend-only MOM preparation. Global availability and per-user opt-in are separate.
+    mom_enabled: bool = False
+    mom_table_name: str = ""
+    mom_bucket_name: str = ""
+    mom_key_arn: str = ""
+    mom_queue_url: str = ""
+    mom_grace_seconds: int = Field(default=600, ge=60, le=3600)
+    mom_retention_seconds: int = Field(default=86400, ge=3600, le=86400)
+    mom_max_session_seconds: int = Field(default=21600, ge=60, le=21600)
+
     # Google Drive OAuth and API settings. The refresh token is persisted by
     # the backend after the one-time browser authorization flow.
     google_drive_client_id: str = Field(default="", validation_alias="GOOGLE_DRIVE_CLIENT_ID")

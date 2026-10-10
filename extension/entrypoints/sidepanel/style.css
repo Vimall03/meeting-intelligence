@@ -62,6 +62,8 @@ h1 { font-size: 14px; font-weight: 700; letter-spacing: -.3px; line-height: 1.4;
   transition: color .15s, background .15s;
 }
 .icon-button svg, .panel-close svg, .refresh-button svg { width: 20px; height: 20px; }
+.ui-icon, .service-icon { display: block; flex: 0 0 auto; }
+.service-icon { object-fit: contain; }
 .icon-button:hover, .panel-close:hover, .settings-button:hover, .refresh-button:hover {
   color: #353c4c;
   background: #e9ecf2;
@@ -129,21 +131,28 @@ h1 { font-size: 14px; font-weight: 700; letter-spacing: -.3px; line-height: 1.4;
 .timeline-entry { min-width: 0; }
 .timeline-card { min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
 .is-task .timeline-card { border-color: #ded9f7; }
-.timeline-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: #6b7486; font-size: 11px; font-weight: 600; }
+.timeline-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #6b7486; font-size: 11px; font-weight: 600; }
 .is-task .timeline-meta > span { color: #695ac8; }
 .timeline-meta time { flex: 0 0 auto; color: #6b7486; font-size: 11px; font-weight: 400; }
 .timeline-card h3 { margin: 8px 0 0; color: #2c3240; font-size: 14px; font-weight: 650; line-height: 1.45; overflow-wrap: anywhere; }
 .timeline-description { margin-top: 6px; color: #616a7c; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .timeline-source { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; margin-top: 9px; color: #657086; font-size: 11px; font-weight: 500; }
 .timeline-meta .timeline-source { min-width: 0; margin-top: 0; }
-.timeline-source-icon { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 5px; color: #6f65c9; background: #f0edfb; font-size: 10px; font-weight: 650; }
+.timeline-source-icon { display: grid; flex: 0 0 18px; width: 18px; height: 18px; place-items: center; color: #657086; }
 .timeline-files { display: flex; flex-direction: column; gap: 0; margin: 10px 0 0; padding: 0; list-style: none; }
 .timeline-files li { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 10px 0; border-top: 1px solid #edf0f4; }
 .timeline-files li:last-child { padding-bottom: 0; }
-.timeline-file-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.file-icon { display: grid; flex: 0 0 30px; width: 30px; height: 34px; place-items: center; border-radius: 7px; color: #657086; background: #f3f5f8; }
+.file-icon--document { color: #2866cd; background: #edf3fd; }
+.file-icon--spreadsheet { color: #248454; background: #eef7f1; }
+.file-icon--presentation { color: #9b6d16; background: #fff7e7; }
+.file-icon--pdf { color: #b04943; background: #fdf0ef; }
+.file-icon--image, .file-icon--video, .file-icon--audio { color: #7462b5; background: #f4f0fb; }
+.file-icon.is-service { background: transparent; }
+.timeline-file-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
 .timeline-file-copy strong { overflow: hidden; color: #3b4354; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .timeline-file-copy span { overflow: hidden; color: #6b7486; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.timeline-files a { display: inline-flex; flex: 0 0 auto; align-items: center; min-height: 36px; padding: 0 6px; border-radius: 6px; color: var(--accent); font-size: 12px; font-weight: 600; text-decoration: none; }
+.timeline-files a { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; min-height: 36px; padding: 0 6px; border-radius: 6px; color: var(--accent); font-size: 12px; font-weight: 600; text-decoration: none; }
 .timeline-files a:hover { background: #f3f0ff; }
 
 /* One settings view, grouped by purpose rather than stacked large cards. */
@@ -157,8 +166,9 @@ h1 { font-size: 14px; font-weight: 700; letter-spacing: -.3px; line-height: 1.4;
 .drive-card-topline { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .section-heading { display: flex; min-width: 0; align-items: flex-start; gap: 10px; }
 .section-heading > div { min-width: 0; }
-.drive-icon, .mic-icon { display: grid; flex: 0 0 30px; width: 30px; height: 30px; place-items: center; border: 1px solid #e8e7f1; border-radius: 8px; color: #796ece; background: #f7f5ff; font-size: 13px; font-weight: 650; }
-.drive-icon.enabled, .mic-icon.enabled { color: #6a60b6; background: #f7f5ff; }
+.connection-icon, .mic-icon { display: grid; flex: 0 0 34px; width: 34px; height: 34px; place-items: center; }
+.mic-icon { border: 1px solid #e4e7ee; border-radius: 9px; color: #697285; background: #f5f6f9; }
+.mic-icon.enabled { border-color: #d5eade; color: #27825e; background: #eff8f3; }
 h2, .section-heading h4 { font-size: 13px; font-weight: 650; line-height: 1.4; }
 .section-heading p { margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .drive-connected-badge { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-top: 2px; color: #2a805d; font-size: 11px; font-weight: 500; line-height: 1.5; }
@@ -200,7 +210,7 @@ h2, .section-heading h4 { font-size: 13px; font-weight: 650; line-height: 1.4; }
 .task-create-actions button:disabled { opacity: .5; cursor: not-allowed; }
 .task-error { margin-top: 10px; color: #a23935; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .task-created { margin-top: 12px; color: #2a805d; font-size: 12px; font-weight: 600; }
-.task-created a { color: #2a805d; }
+.task-created a { display: inline-flex; align-items: center; gap: 4px; color: #2a805d; }
 
 .footer { display: flex; flex: 0 0 auto; flex-direction: column; gap: 7px; margin-top: auto; padding-top: 9px; border-top: 1px solid var(--border); color: #6b7486; font-size: 11px; }
 .footer-status { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 26px; }
@@ -233,7 +243,7 @@ h2, .section-heading h4 { font-size: 13px; font-weight: 650; line-height: 1.4; }
   .brand-mark { flex-basis: 28px; width: 28px; height: 28px; }
   .brand-copy p { font-size: 10px; }
   .drive-card-topline { flex-wrap: wrap; gap: 6px; }
-  .drive-card-topline > .drive-connected-badge { margin-left: 40px; }
+  .drive-card-topline > .drive-connected-badge { margin-left: 44px; }
   .meeting-card, .section-card, .timeline-card { padding: 12px; }
   .settings-group > .settings-heading { padding: 12px 12px 0; }
   .account-settings { align-items: flex-start; flex-wrap: wrap; padding: 12px; }

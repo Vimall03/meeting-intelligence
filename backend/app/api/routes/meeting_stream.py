@@ -16,6 +16,8 @@ from app.services.meeting_sessions import MeetingSessions, MeetingCheckpoints, M
 from fastapi.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.api.routes.mom import available as mom_available, repository_for as mom_repository
+from app.mom.repository import MomError
 from app.core.observability import (
     log_event, log_context, set_log_context, new_id, error_fields, observe_operation,
 )
@@ -35,21 +37,21 @@ from app.services.openrouter_stt_service import transcribe_realtime_chunk
 router = APIRouter()
 
 
-def write_audio_snapshot(audio: bytes) -> str:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as audio_file:
-        audio_file.write(audio)
-        return audio_file.name
-
-
 async def transcribe_snapshot(audio: bytes) -> dict:
-    snapshot_path = Path(await run_in_threadpool(write_audio_snapshot, audio))
+    def transcribe_and_clear():
+        # One thread owns creation, transcription, and deletion, even if the
+        # caller disconnects while disk I/O is still starting.
+        with tempfile.TemporaryDirectory(prefix='mi-audio-') as folder:
+            snapshot = Path(folder) / 'capture.webm'
+            snapshot.write_bytes(audio)
+            return transcribe_realtime_chunk(str(snapshot))
+    work = asyncio.create_task(run_in_threadpool(transcribe_and_clear))
     try:
-        return await run_in_threadpool(
-            transcribe_realtime_chunk,
-            str(snapshot_path),
-        )
-    finally:
-        snapshot_path.unlink(missing_ok=True)
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):
+            await work
+        raise
 
 
 async def evaluate_new_context(
@@ -93,6 +95,9 @@ async def _meeting_stream(websocket: WebSocket):
     db = websocket.app.state.users
     providers = AsyncExitStack()
     session = None
+    mom_repo = None
+    mom_attachment = None
+    live_enabled = True
     try:
         hello = await asyncio.wait_for(websocket.receive_text(), timeout=10)
         if len(hello) > 512:
@@ -108,16 +113,36 @@ async def _meeting_stream(websocket: WebSocket):
         if not isinstance(last_ack, int) or isinstance(last_ack, bool) or last_ack < 0 or last_ack > restored.get('ack', 0):
             raise MeetingResumeExpired()
         sequenced = bool(payload.get('meetingId'))
-        google_drive = await providers.enter_async_context(provider_session(db, principal, 'google_drive'))
-        atlassian = await providers.enter_async_context(provider_session(db, principal, 'atlassian'))
+        if mom_available():
+            mom_repo = mom_repository(websocket.app)
+            prefs = await asyncio.to_thread(mom_repo.preferences, principal.sub)
+            if payload.get('roomId'):
+                mom_attachment = await asyncio.to_thread(mom_repo.begin, principal.sub,
+                    payload['roomId'], session.session_id, payload.get('momSessionId'))
+            elif prefs['mode'] != 'live_only':
+                raise MomError('MI-MOM-003')
+            if mom_attachment:
+                saved = await asyncio.to_thread(mom_repo.load_checkpoint, mom_attachment, session.session_id)
+                if saved is not None:
+                    restored = saved
+                    if last_ack > restored.get('ack', 0): raise MeetingResumeExpired()
+            live_enabled = not mom_attachment or mom_attachment['mode'] != 'mom_only'
+        if live_enabled:
+            google_drive = await providers.enter_async_context(provider_session(db, principal, 'google_drive'))
+            atlassian = await providers.enter_async_context(provider_session(db, principal, 'atlassian'))
+        else:
+            google_drive = atlassian = None
     except Exception as exc:
         await providers.aclose()
+        if mom_attachment:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(mom_repo.detach, mom_attachment, incomplete=True)
         if session and session.version is not None:
             await session.release()
         if registry:
             registry.sockets.discard(websocket)
         code = 4409 if isinstance(exc, MeetingResumeExpired) else 4410 if isinstance(exc, MeetingBusy) else 4401 if isinstance(exc, HTTPException) and exc.status_code == 401 else 1013
-        reason = 'MI-CON-007' if code == 4409 else 'MI-AUTH-105' if code == 4401 else 'MI-CON-004'
+        reason = exc.code if isinstance(exc, MomError) else 'MI-CON-007' if code == 4409 else 'MI-AUTH-105' if code == 4401 else 'MI-CON-004'
         log_event('meeting.rejected', level=logging.WARNING, **{**error_fields(exc), 'close_code': code, 'support_code': reason})
         await websocket.close(code=code, reason=reason)
         return
@@ -127,7 +152,14 @@ async def _meeting_stream(websocket: WebSocket):
     checkpoint_count = 0
     checkpoint_total_ms = 0.0
     checkpoint_max_ms = 0.0
-    checkpoints = MeetingCheckpoints(session)
+    class MinutesCheckpointSession:
+        async def save(self, state):
+            await asyncio.to_thread(mom_repo.save_checkpoint, mom_attachment, session.session_id, state)
+            # The existing table has PITR. Do not place new MOM content in its backups.
+            await session.save({'ack': state['ack'], 'audioEnd': state['audioEnd'],
+                'transcript': '', 'context': {}, 'events': {}, 'jobs': {},
+                'timeline': {'session_id': state['timeline']['session_id'], 'revision': state['timeline']['revision'], 'items': []}})
+    checkpoints = MeetingCheckpoints(MinutesCheckpointSession() if mom_attachment else session)
 
     async def checkpoint():
         nonlocal checkpoint_count, checkpoint_total_ms, checkpoint_max_ms
@@ -161,7 +193,7 @@ async def _meeting_stream(websocket: WebSocket):
     received_sequence = ack
     audio_sequence = None
     transcription_sequence = None
-    jobs = restored.get('jobs', {})
+    jobs = restored.get('jobs', {}) if live_enabled else {}
     task_jobs = {}
     transcribed_audio_end = restored.get('audioEnd', 0.0)
     transcript_text = restored.get('transcript', '')
@@ -179,7 +211,7 @@ async def _meeting_stream(websocket: WebSocket):
             model=settings.jev_model,
             endpoint=settings.jev_decisions_url,
         )
-        if settings.openrouter_api_key
+        if settings.openrouter_api_key and live_enabled
         else None
     )
     llm = (
@@ -188,7 +220,7 @@ async def _meeting_stream(websocket: WebSocket):
             model=settings.gemma_model,
             endpoint=settings.gemma_chat_completions_url,
         )
-        if settings.openrouter_api_key
+        if settings.openrouter_api_key and live_enabled
         else None
     )
     event_service = EventService(
@@ -272,25 +304,85 @@ async def _meeting_stream(websocket: WebSocket):
             start_search(job_id, job)
 
 
+    async def accept_transcript(transcript, *, send=True, elapsed=0):
+        nonlocal transcribed_audio_end, empty_audio_seconds, transcript_text, ack, jev_evaluation_requested
+        window_start = transcribed_audio_end
+        new_segments = [
+            {
+                **segment,
+                "start": segment["start"] + transcribed_audio_end,
+                "end": segment["end"] + transcribed_audio_end,
+            }
+            for segment in transcript["segments"]
+        ]
+        if mom_attachment:
+            await asyncio.to_thread(mom_repo.append, mom_attachment, session.session_id,
+                transcription_sequence, new_segments)
+        transcribed_audio_end += transcript["audio_duration"]
+        log_event('meeting.transcription.accepted', sequence=transcription_sequence,
+            audio_start_seconds=window_start, audio_end_seconds=transcribed_audio_end,
+            audio_seconds=transcript['audio_duration'], elapsed_ms=round(elapsed * 1000, 2),
+            segment_count=len(new_segments), audio_rms=transcript.get('audio_rms', 0.0),
+            audio_peak=transcript.get('audio_peak', 0.0))
+        empty_audio_seconds = 0.0 if new_segments else empty_audio_seconds + transcript["audio_duration"]
+        if new_segments:
+            transcript_text = (transcript_text + " " + " ".join(segment["text"] for segment in new_segments)).strip()[-3000:]
+        warning = None
+        if empty_audio_seconds >= 15 and transcript.get("audio_rms", 0) > 0.001:
+            warning = "Audio is arriving, but no words were recognized. Check the microphone input and speak clearly."
+        if new_segments and live_enabled:
+            accepted_segments = meeting_context.add_segments(new_segments)
+            if accepted_segments:
+                ack = transcription_sequence
+                jev_evaluation_requested = True
+                new_text = " ".join(
+                    segment.text for segment in accepted_segments
+                )
+                log_event('meeting.context.updated', sequence=transcription_sequence,
+                          segment_count=len(accepted_segments), text_chars=len(new_text))
+                if send:
+                    await dispatch_events(
+                        event_service.enrich(new_text, recent_context=meeting_context.as_text(),
+                            now=time.monotonic(), background_context=meeting_context.background_text())
+                    )
+
+        ack = transcription_sequence
+        if send:
+            await safe_send({"type": "transcription_state", "transcript": transcript_text, "warning": warning})
+            await safe_send({'type': 'audio_ack', 'sequence': ack})
+        else:
+            await checkpoint()
+
     last_heartbeat = 0.0
     last_client_ping = time.monotonic()
     close_reason = 'disconnected'
     receive_task = None
+    ending = False
+    finish_minutes = False
+    last_mom_touch = 0.0
     try:
         await safe_send({'type': 'auth_ready', 'expiresAt': principal.expires,
             'expiresIn': max(0, principal.expires - int(time.time())), 'ack': ack, 'meetingId': session.session_id})
         await safe_send(timeline.snapshot())
+        if mom_attachment:
+            await safe_send({'type': 'mom_session', 'sessionId': mom_attachment['sessionId'],
+                'mode': mom_attachment['mode'], 'graceSeconds': settings.mom_grace_seconds})
         while True:
             try:
-                if receive_task is None:
+                if receive_task is None and not ending:
                     receive_task = asyncio.create_task(websocket.receive())
-                work = {receive_task, *(task for task, _, _ in llm_tasks),
+                work = {*(task for task, _, _ in llm_tasks),
                         *(task for task, _, _ in drive_tasks), *(task for task, _, _ in atlassian_tasks)}
+                if receive_task:
+                    work.add(receive_task)
                 if transcription_task:
                     work.add(transcription_task)
                 if jev_task:
                     work.add(jev_task)
-                ready, _ = await asyncio.wait(work, timeout=0.25, return_when=asyncio.FIRST_COMPLETED)
+                if not work:
+                    ready = set()
+                else:
+                    ready, _ = await asyncio.wait(work, timeout=0.25, return_when=asyncio.FIRST_COMPLETED)
                 message = {}
                 if receive_task in ready:
                     received, receive_task = receive_task, None
@@ -310,8 +402,14 @@ async def _meeting_stream(websocket: WebSocket):
                         if not isinstance(value, int) or isinstance(value, bool) or value < 1 or audio_sequence is not None:
                             raise ValueError('Invalid audio sequence')
                         audio_sequence = value
-                    elif control.get('type') == 'end':
-                        raise WebSocketDisconnect()
+                    elif control.get('type') in ('end', 'finish'):
+                        if not mom_attachment:
+                            raise WebSocketDisconnect()
+                        final_sequence = control.get('lastSequence')
+                        if not isinstance(final_sequence, int) or isinstance(final_sequence, bool) or final_sequence != received_sequence or audio_sequence is not None:
+                            raise MomError('MI-MOM-003')
+                        ending = True
+                        finish_minutes = control['type'] == 'finish'
                     else:
                         renewed = await consume_ticket(control.get('ticket'), db)
                         if renewed.sub != principal.sub or renewed.family != principal.family:
@@ -336,7 +434,14 @@ async def _meeting_stream(websocket: WebSocket):
                 pass
 
             now = time.monotonic()
-            if sequenced and now - last_client_ping > 50:
+            if mom_attachment and now - last_mom_touch >= 5:
+                await asyncio.to_thread(mom_repo.touch, mom_attachment)
+                last_mom_touch = now
+            if ending and transcription_task is None and not pending_audio_windows:
+                await safe_send({'type': 'meeting_segment_ended', 'ack': ack, 'minutesFinalizing': finish_minutes})
+                close_reason = 'finished' if finish_minutes else 'stopped'
+                break
+            if sequenced and not ending and now - last_client_ping > 50:
                 close_reason = 'heartbeat_timeout'
                 log_event('meeting.heartbeat.timeout', level=logging.WARNING, close_code=1013, support_code='MI-CON-004')
                 await websocket.close(code=1013, reason='MI-CON-004')
@@ -361,49 +466,7 @@ async def _meeting_stream(websocket: WebSocket):
                     await websocket.close(code=1013, reason='MI-CON-004')
                     break
                 else:
-                    window_start = transcribed_audio_end
-                    new_segments = [
-                        {
-                            **segment,
-                            "start": segment["start"] + transcribed_audio_end,
-                            "end": segment["end"] + transcribed_audio_end,
-                        }
-                        for segment in transcript["segments"]
-                    ]
-                    transcribed_audio_end += transcript["audio_duration"]
-                    log_event('meeting.transcription.accepted', sequence=transcription_sequence,
-                        audio_start_seconds=window_start, audio_end_seconds=transcribed_audio_end,
-                        audio_seconds=transcript['audio_duration'], elapsed_ms=round(latency * 1000, 2),
-                        segment_count=len(new_segments), audio_rms=transcript.get('audio_rms', 0.0),
-                        audio_peak=transcript.get('audio_peak', 0.0))
-                    empty_audio_seconds = 0.0 if new_segments else empty_audio_seconds + transcript["audio_duration"]
-                    if new_segments:
-                        transcript_text = (transcript_text + " " + " ".join(segment["text"] for segment in new_segments)).strip()[-3000:]
-                    warning = None
-                    if empty_audio_seconds >= 15 and transcript.get("audio_rms", 0) > 0.001:
-                        warning = "Audio is arriving, but no words were recognized. Check the microphone input and speak clearly."
-                    if new_segments:
-                        accepted_segments = meeting_context.add_segments(new_segments)
-                        if accepted_segments:
-                            ack = transcription_sequence
-                            jev_evaluation_requested = True
-                            new_text = " ".join(
-                                segment.text for segment in accepted_segments
-                            )
-                            log_event('meeting.context.updated', sequence=transcription_sequence,
-                                      segment_count=len(accepted_segments), text_chars=len(new_text))
-                            await dispatch_events(
-                                event_service.enrich(
-                                    new_text,
-                                    recent_context=meeting_context.as_text(),
-                                    now=now,
-                                    background_context=meeting_context.background_text(),
-                                )
-                            )
-
-                    ack = transcription_sequence
-                    await safe_send({"type": "transcription_state", "transcript": transcript_text, "warning": warning})
-                    await safe_send({'type': 'audio_ack', 'sequence': ack})
+                    await accept_transcript(transcript, elapsed=latency)
 
             if (
                 transcription_task is None
@@ -637,6 +700,11 @@ async def _meeting_stream(websocket: WebSocket):
                     )
             # Changed work is captured before the next receive can suspend.
             # Heartbeats/outputs also checkpoint, so no per-loop extra write is needed.
+    except MomError as exc:
+        close_reason = 'minutes_interrupted'
+        log_event('meeting.interrupted', level=logging.WARNING, reason=close_reason, support_code=exc.code)
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1013, reason=exc.code)
     except MeetingBusy:
         close_reason = 'lease_conflict'
         log_event('meeting.interrupted', level=logging.WARNING, reason=close_reason, close_code=4410, support_code='MI-CON-004')
@@ -664,6 +732,18 @@ async def _meeting_stream(websocket: WebSocket):
             receive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await receive_task
+        if mom_attachment:
+            async def drain_received_audio():
+                nonlocal transcription_task, transcription_sequence
+                while transcription_task or pending_audio_windows:
+                    if transcription_task is None:
+                        transcription_sequence, audio, _ = pending_audio_windows.popleft()
+                        transcription_task = asyncio.create_task(transcribe_snapshot(audio))
+                    result = await asyncio.shield(transcription_task)
+                    transcription_task = None
+                    await accept_transcript(result, send=False)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(drain_received_audio(), timeout=25)
         # Save pending read-only jobs before cancellation; another process can
         # replay them using the same authenticated meeting identity.
         with contextlib.suppress(Exception):
@@ -696,6 +776,9 @@ async def _meeting_stream(websocket: WebSocket):
         if llm:
             await llm.close()
         await session.release()
+        if mom_attachment:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(mom_repo.detach, mom_attachment, finish=finish_minutes and ack == received_sequence, incomplete=ack != received_sequence)
         log_event('meeting.disconnected', reason=close_reason, ack=ack, pending_jobs=len(jobs),
                   duration_ms=round((time.perf_counter() - connection_started) * 1000, 2),
                   checkpoint_count=checkpoint_count, checkpoint_total_ms=round(checkpoint_total_ms, 2),

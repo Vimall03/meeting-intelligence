@@ -1,6 +1,7 @@
 import { AuthGate } from './AuthGate';
 import { PolicyLinks } from './PolicyLinks';
 import { UiIcon } from './UiIcon';
+import { FileIcon, ServiceIcon } from './ContentIcon';
 import { closeSidePanel } from '../../lib/side-panel';
 import { authenticatedFetch as fetch } from '../../lib/http';
 import { problem, userError, httpProblem, microphoneProblem } from '../../lib/user-messages';
@@ -112,7 +113,7 @@ function TaskSuggestionCard({ item, connected, canCreate, connecting, onConnect,
     }
   };
 
-  if (created) return <p className="task-created" role="status">Created <a href={created.url} target="_blank" rel="noreferrer">{created.key} ↗</a></p>;
+  if (created) return <p className="task-created" role="status">Created <a href={created.url} target="_blank" rel="noreferrer">{created.key}<UiIcon name="external" size={14} /></a></p>;
   if (!connected) return <button className="task-action" type="button" disabled={connecting} onClick={() => onConnect()}>{connecting ? 'Connecting Atlassian…' : 'Connect Jira & Confluence to create'}</button>;
   if (!canCreate) return <button className="task-action" type="button" disabled={connecting} onClick={() => onConnect(true)}>{connecting ? 'Waiting for permission…' : 'Allow Jira task creation'}</button>;
   return <div className="task-create">
@@ -738,7 +739,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
 
       <div className={`capture-controls ${settingsOpen ? 'is-settings' : ''}`} hidden={settingsOpen && !running}>
       <section className={`meeting-card ${running ? 'is-active' : inMeeting ? 'is-ready' : ''}`} aria-live="polite">
-        <div className="status-icon" aria-hidden="true">{running ? '●' : inMeeting && microphone === 'granted' && readyTabId === activeTab?.id ? '✓' : '•'}</div>
+        <div className="status-icon" aria-hidden="true"><UiIcon name={running ? 'waveform' : inMeeting && microphone === 'granted' && readyTabId === activeTab?.id ? 'check' : 'headphones'} size={18} /></div>
         <div className="status-copy">
           <strong>{statusTitle}</strong>
           <span>{running
@@ -757,6 +758,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
 
       {!running && <div className="actions">
           <button className="start-button" onClick={startCapture} disabled={busy || !inMeeting || microphone !== 'granted' || readyTabId !== activeTab?.id}>
+            <UiIcon name="microphone" size={18} />
             {busy ? 'Starting…' : readyTabId !== activeTab?.id && inMeeting && microphone === 'granted' ? 'Preparing…' : state.captureStatus === 'error' ? 'Try listening again' : 'Start listening'}
           </button>
         {(!inMeeting || microphone === 'checking' || microphone === 'granted') && <p className="action-hint">{!inMeeting ? 'Join a Google Meet call to start listening.' : microphone === 'checking' ? 'Checking microphone access…' : 'You control when listening starts and stops.'}</p>}
@@ -781,14 +783,14 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
         </div>
         <div className="timeline-scroll" ref={timelineScrollRef}>
           {timelineItems.length === 0 ? (
-            <div className="timeline-empty"><span className="empty-symbol" aria-hidden="true">✦</span><strong>{running ? 'Listening for context' : 'Your meeting activity appears here'}</strong><p>{running ? 'Related files and suggested tasks will appear as you talk.' : 'Start listening in Google Meet to find related work and follow-ups.'}</p></div>
+            <div className="timeline-empty"><span className="empty-symbol" aria-hidden="true"><UiIcon name={running ? 'waveform' : 'headphones'} size={22} /></span><strong>{running ? 'Listening for context' : 'Your meeting activity appears here'}</strong><p>{running ? 'Related files and suggested tasks will appear as you talk.' : 'Start listening in Google Meet to find related work and follow-ups.'}</p></div>
           ) : (
             <ol className="timeline-list">
               {timelineItems.map((item) => (
                 <li className={`timeline-entry ${item.kind === 'task_suggestion' ? 'is-task' : 'is-search'}`} key={item.id}>
                   <article className="timeline-card">
                     <div className="timeline-meta">
-                      {item.kind === 'task_suggestion' ? <span>Suggested task</span> : <span className="timeline-source"><span className="timeline-source-icon" aria-hidden="true">{item.source.label.charAt(0)}</span>{item.source.label}</span>}
+                      {item.kind === 'task_suggestion' ? <span className="timeline-source"><UiIcon name="task" size={16} />Suggested task</span> : <span className="timeline-source"><span className="timeline-source-icon" aria-hidden="true"><ServiceIcon service={item.source.id} size={18} /></span>{item.source.label}</span>}
                       <time dateTime={item.created_at}>{timelineTime(item.created_at)}</time>
                     </div>
                     {item.kind === 'task_suggestion' ? (
@@ -804,11 +806,12 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
                           <ul className="timeline-files">
                             {item.files.map((file) => (
                               <li key={file.id}>
+                                <FileIcon mimeType={file.mime_type} />
                                 <div className="timeline-file-copy">
                                   <strong title={file.name}>{file.name}</strong>
                                   <span>{file.subtitle ? `${file.subtitle} · ` : ''}{driveFileType(file.mime_type)}</span>
                                 </div>
-                                {searchResultUrl(file, item.source.id) && <a href={searchResultUrl(file, item.source.id)} target="_blank" rel="noreferrer" aria-label={`Open ${file.name}`}>Open ↗</a>}
+                                {searchResultUrl(file, item.source.id) && <a href={searchResultUrl(file, item.source.id)} target="_blank" rel="noreferrer" aria-label={`Open ${file.name}`}>Open<UiIcon name="external" size={14} /></a>}
                               </li>
                             ))}
                           </ul>
@@ -830,7 +833,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
       <section className="section-card drive-card" aria-live="polite">
         <div className="drive-card-topline">
           <div className="section-heading">
-            <span className={`drive-icon ${googleDriveConnection === 'connected' ? 'enabled' : ''}`} aria-hidden="true">G</span>
+            <span className="connection-icon" aria-hidden="true"><ServiceIcon service="google_drive" size={32} /></span>
             <div>
               <h4>Google Drive</h4>
               <p>{googleDriveConnection === 'connected'
@@ -840,7 +843,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
                     : 'Find related documents'}</p>
             </div>
           </div>
-          {googleDriveConnection === 'connected' && <span className="drive-connected-badge">Connected</span>}
+          {googleDriveConnection === 'connected' && <span className="drive-connected-badge"><UiIcon name="check" size={12} />Connected</span>}
         </div>
         {googleDriveConnection === 'connected' && <button className="drive-connect-button is-secondary" disabled={googleDriveBusy} onClick={() => {
           setGoogleDriveBusy(true);
@@ -866,7 +869,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
       <section className="section-card drive-card" aria-live="polite">
         <div className="drive-card-topline">
           <div className="section-heading">
-            <span className={`drive-icon ${atlassianConnection === 'connected' ? 'enabled' : ''}`} aria-hidden="true">A</span>
+            <span className="connection-icon" aria-hidden="true"><ServiceIcon service="atlassian" size={32} /></span>
             <div>
               <h4>Jira & Confluence</h4>
               <p>{atlassianConnection === 'connected'
@@ -878,7 +881,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
                       : problem('MI-ATL-004')}</p>
             </div>
           </div>
-          {atlassianConnection === 'connected' && <span className="drive-connected-badge">Connected</span>}
+          {atlassianConnection === 'connected' && <span className="drive-connected-badge"><UiIcon name="check" size={12} />Connected</span>}
         </div>
         {atlassianConnection === 'connected' && <>
           {sites.length > 1 && <label className="task-field">Atlassian site
@@ -909,7 +912,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
       <div className="settings-group"><h3 className="settings-heading">Audio</h3>
       <section className="section-card">
         <div className="section-heading">
-          <span className={`mic-icon ${microphone === 'granted' ? 'enabled' : ''}`} aria-hidden="true">{microphone === 'granted' ? '✓' : '♪'}</span>
+          <span className={`mic-icon ${microphone === 'granted' ? 'enabled' : ''}`} aria-hidden="true"><UiIcon name="microphone" size={20} /></span>
           <div><h4>Microphone</h4><p>{microphone === 'granted' ? 'Access is enabled' : microphone === 'denied' ? 'Permission needs attention' : 'Needed to include your voice'}</p></div>
         </div>
         {microphone === 'denied' && (
