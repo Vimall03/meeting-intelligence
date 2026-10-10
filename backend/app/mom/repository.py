@@ -38,6 +38,15 @@ def encode(value):
     return value
 
 
+def decode(value):
+    # boto3 returns DynamoDB numbers as Decimal. Session clocks and datetime
+    # consume ordinary Python numbers; keep integer timestamps/versions exact.
+    if isinstance(value, Decimal): return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, dict): return {k: decode(v) for k, v in value.items()}
+    if isinstance(value, list): return [decode(v) for v in value]
+    return value
+
+
 class Repository:
     LEASE_SECONDS = 90
     MAX_CAPTURES = 64
@@ -60,7 +69,7 @@ class Repository:
     def get(self, key):
         item = self.client('dynamodb').get_item(TableName=self.table,
             Key={'pk': {'S': key}}, ConsistentRead=True).get('Item')
-        return {k: TypeDeserializer().deserialize(v) for k, v in item.items()} if item else None
+        return decode({k: TypeDeserializer().deserialize(v) for k, v in item.items()}) if item else None
 
     def put(self, row, *, version=None):
         serializer = TypeSerializer()

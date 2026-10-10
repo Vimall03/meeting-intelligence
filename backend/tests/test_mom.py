@@ -401,3 +401,45 @@ class ExpiredOwnerTests(unittest.TestCase):
         repo.detach(row)
         self.assertEqual(repo.get(row['pk'])['finalizeAfter'],deadline)
         self.assertFalse(repo.s3.objects)
+
+class DynamoNumericBoundaryTests(unittest.TestCase):
+    def repository(self):
+        from boto3.dynamodb.types import TypeSerializer
+        from app.mom.repository import encode
+        repo = MemoryRepository()
+        # Exercise production get(), including boto3's Decimal deserialization.
+        repo.dynamo.get_item = lambda **args: {'Item': {
+            k: TypeSerializer().serialize(encode(v))
+            for k, v in repo.rows.get(args['Key']['pk']['S'], {}).items()}}
+        repo.get = lambda key: Repository.get(repo, key)
+        repo.clock = lambda: repo.now[0] + 0.25
+        repo.set_preferences('A', 'mom_only', 'Asia/Kolkata', 'verified-A')
+        return repo
+
+    def test_production_numeric_round_trip_allows_checkpoint_and_audio_ack(self):
+        repo = self.repository()
+        attachment = repo.begin('A', 'abc-defg-hij', 'capture-1')
+        restored = repo.get(attachment['pk'])
+        self.assertIsInstance(restored['startedAt'], int)
+        self.assertIsInstance(restored['version'], int)
+        repo.save_checkpoint(attachment, 'capture-1', {'ack': 0, 'timeline': {'items': []}})
+        repo.append(attachment, 'capture-1', 1, [{'text': 'Synthetic follow-up', 'start': 0, 'end': 3}])
+        self.assertEqual(repo.load_checkpoint(attachment, 'capture-1')['ack'], 0)
+        self.assertIn('Synthetic follow-up', transcript(repo, repo.get(attachment['pk'])))
+
+    def test_deserialized_session_dates_can_render_email_without_sending_it(self):
+        from app.mom.email_template import render_minutes
+        repo = self.repository()
+        row = repo.begin('A', 'abc-defg-hij', 'capture-1')
+        html = render_minutes('Key points\n• Synthetic follow-up', repo.get(row['pk']))
+        self.assertIn('Asia/Kolkata', html)
+        self.assertIn('Synthetic follow-up', html)
+
+    def test_numeric_round_trip_preserves_fences_and_session_expiry(self):
+        repo = self.repository()
+        row = repo.begin('A', 'abc-defg-hij', 'capture-1')
+        changed_owner = {**row, 'owner': 'old-owner'}
+        with self.assertRaises(Conflict): repo.touch(changed_owner)
+        repo.rows[row['pk']]['startedAt'] = repo.now[0] - repo.max_session
+        with self.assertRaises(MomError) as exc: repo.touch(row)
+        self.assertEqual(exc.exception.code, 'MI-MOM-007')
