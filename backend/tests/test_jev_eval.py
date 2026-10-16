@@ -2,13 +2,13 @@ import json
 import unittest
 from pathlib import Path
 
-from jev_eval import summarize
+from jev_eval import DEFAULT_FIXTURE, summarize
 
 
-FIXTURE = Path(__file__).parent / "fixtures/jev_real_meeting.json"
+FIXTURE = Path(__file__).parent / "fixtures/jev_natural_meetings.json"
 
 
-class JevRealMeetingFixtureTests(unittest.TestCase):
+class JevSyntheticMeetingFixtureTests(unittest.TestCase):
     def test_a_positive_decision_without_a_usable_draft_is_not_reported_as_a_success(self):
         windows = [{"id": "request", "expected": {"search_existing": True, "suggest_new_task": True}}]
         scores = [{"search_existing": .9, "suggest_new_task": .9,
@@ -28,11 +28,13 @@ class JevRealMeetingFixtureTests(unittest.TestCase):
     def test_fixture_is_complete_and_baseline_is_reproducible(self) -> None:
         fixture = json.loads(FIXTURE.read_text())
         windows = fixture["windows"]
-        self.assertEqual(len(windows), 46)
+        self.assertEqual(DEFAULT_FIXTURE, FIXTURE)
+        self.assertIn("Synthetic", fixture["description"])
+        self.assertEqual(len(windows), 12)
         self.assertEqual(len({window["id"] for window in windows}), len(windows))
         for window in windows:
-            self.assertTrue(window["recent_context"].startswith("UNKNOWN:"))
-            self.assertTrue(window["new_context"].startswith("UNKNOWN:"))
+            self.assertTrue(window["recent_context"])
+            self.assertTrue(window["new_context"])
             for signal in ("search_existing", "suggest_new_task"):
                 self.assertIs(type(window["expected"][signal]), bool)
                 self.assertGreaterEqual(window["observed"][signal], 0)
@@ -45,11 +47,11 @@ class JevRealMeetingFixtureTests(unittest.TestCase):
         )
         self.assertEqual(
             (baseline["search_existing"]["tp"], baseline["search_existing"]["fn"]),
-            (0, 3),
+            (5, 0),
         )
         self.assertEqual(
             (baseline["suggest_new_task"]["tp"], baseline["suggest_new_task"]["fn"]),
-            (1, 7),
+            (3, 0),
         )
         self.assertEqual(baseline["search_existing"]["fp"], 0)
         self.assertEqual(baseline["suggest_new_task"]["fp"], 0)

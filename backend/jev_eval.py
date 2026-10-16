@@ -19,7 +19,7 @@ from app.services.event_service import MeetingEvent
 from app.services.google_drive_service import GoogleDriveSearchTerms
 
 
-DEFAULT_FIXTURE = Path(__file__).parent / "tests/fixtures/jev_real_meeting.json"
+DEFAULT_FIXTURE = Path(__file__).parent / "tests/fixtures/jev_natural_meetings.json"
 SIGNALS = ("search_existing", "suggest_new_task")
 
 

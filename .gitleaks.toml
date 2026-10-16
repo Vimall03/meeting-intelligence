@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+# This exact RSA public key preserves the published extension identity.
+# Match only this value in this file; continue scanning all other content.
+[[allowlists]]
+description = "Published Chrome extension public identity key"
+condition = "AND"
+paths = ['(^|/)extension/wxt\.config\.ts$']
+regexTarget = "secret"
+regexes = ['''^MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAosv16yqEH27nxiUDK91Pksq2VKquEntod1mLF3TiM/R/x8X6eDGr2ajv1wojxz9eE8m16fpRoDKaHRbC5FlfDxbDDiyqzFU1YoR3w17/TMPftZeJ68HcTcA0H2monsrUow9MXCUHq/o7swM3C/372f3EMsMt71PFLj8RPG2dkeuXaWP/CoqVnS8c75C5si\+DvnL/XDS0DGNIApwhwiDAB8zMsyhlFx71Dp8gF8mhWepW7rK4mEUfKYSInapTT\+QLtOFCCdYFHWRsYmxgFiLP6yZsiMwRR0iLs7yzlZU3FPASFP0wcibwI/taL9qYyVT3ygyn4hjMjWyJqM6CqazkUQIDAQAB$''']

@@ -9,11 +9,33 @@ wheels/
 # Virtual environments
 .venv
 
-#env secrets 
+# Local secrets, saved credentials, and private meeting material
 .env
-.env.production
+.env.*
+!.env.example
+!.env.*.example
 backend/.data/
-samples/*
+samples/
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.webm
+*.mp4
+*.flac
+*.aac
+*.opus
+*.mov
+*.pem
+*.key
+*.p12
+*.log
+
+# Private operations notes and evaluation exports
+docs/sbx-*
+docs/ses-*
+docs/auth-integration-readiness.md
+docs/mom-*
 
 # Local caches and extension archives
 .DS_Store
