@@ -1,3 +1,5 @@
+import { meetingPlatformFromUrl, MEETING_MATCHES } from './meeting-session.ts';
+
 export type ContentScriptManifest = {
   content_scripts?: Array<{
     matches?: string[];
@@ -5,9 +7,12 @@ export type ContentScriptManifest = {
   }>;
 };
 
-export function meetContentScriptFiles(manifest: ContentScriptManifest): string[] {
+export function meetingContentScriptFiles(manifest: ContentScriptManifest, tabUrl: string | undefined): string[] {
+  const platform = meetingPlatformFromUrl(tabUrl);
+  if (!platform) return [];
+  const match = MEETING_MATCHES[platform === 'google_meet' ? 0 : 1];
   return manifest.content_scripts
-    ?.find((script) => script.matches?.some((match) => match.includes('meet.google.com')))
+    ?.find((script) => script.matches?.includes(match))
     ?.js?.filter(Boolean) ?? [];
 }
 
@@ -15,15 +20,17 @@ export async function probeWithContentScriptRecovery<T>({
   probe,
   inject,
   manifest,
+  tabUrl,
 }: {
   probe: () => Promise<T>;
   inject: (files: string[]) => Promise<void>;
   manifest: ContentScriptManifest;
+  tabUrl: string | undefined;
 }): Promise<T> {
   try {
     return await probe();
   } catch (originalError) {
-    const files = meetContentScriptFiles(manifest);
+    const files = meetingContentScriptFiles(manifest, tabUrl);
     if (files.length === 0) throw originalError;
     await inject(files);
     return probe();

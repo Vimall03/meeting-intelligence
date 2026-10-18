@@ -21,7 +21,7 @@ function harness() {
     observe() {}
     disconnect() {}
   }
-  const source = fs.readFileSync(new URL('../entrypoints/meet.content.ts', import.meta.url), 'utf8');
+  const source = fs.readFileSync(new URL('../entrypoints/meeting.content.ts', import.meta.url), 'utf8');
   vm.runInNewContext(ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText, {

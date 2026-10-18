@@ -16,7 +16,7 @@ from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from botocore.config import Config
 
 MODES = {'live_only', 'mom_only', 'both'}
-ROOM = re.compile(r'[a-z0-9]{2,4}-[a-z0-9]{2,4}-[a-z0-9]{2,4}')
+ROOM = re.compile(r'(?:[a-z0-9]{2,4}-[a-z0-9]{2,4}-[a-z0-9]{2,4}|zoom:[0-9]{9,11})')
 IDENTIFIER = re.compile(r'[A-Za-z0-9_-]{1,128}')
 TERMINAL = {'sent', 'empty', 'expired'}
 

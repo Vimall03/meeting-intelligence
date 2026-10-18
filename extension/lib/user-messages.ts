@@ -17,7 +17,7 @@ export const userMessages = {
   'MI-APP-001': 'Something went wrong. Try again. If it keeps happening, share this code with support.',
   'MI-APP-002': 'We couldn’t update this meeting. Refresh the meeting tab and try again.',
   'MI-APP-003': 'We couldn’t close this panel. Use the close button in your browser’s side panel.',
-  'MI-CAP-001': 'Join a Google Meet call, then start listening. Other meeting platforms aren’t supported yet.',
+  'MI-CAP-001': 'Join Google Meet or a Zoom call in your browser, then start listening. Zoom desktop calls aren’t supported.',
   'MI-CAP-002': 'You’re already listening to a meeting. Stop that session before starting another.',
   'MI-CAP-003': 'Select your meeting tab and click Meeting Intelligence in the browser toolbar, then choose Start listening. Your browser needs this step to allow meeting audio.',
   'MI-CAP-004': 'We couldn’t start listening. Refresh your meeting tab and try again.',

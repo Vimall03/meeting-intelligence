@@ -1,6 +1,6 @@
 # Meeting Intelligence
 
-An assistant for online meetings. Live listening currently supports Google Meet.
+An assistant for online meetings. Live listening supports Google Meet. Zoom browser capture is available as a preview; Zoom desktop calls aren’t supported.
 
 - Finds relevant Google Drive files, Jira issues, and Confluence pages as you talk.
 - Drafts follow-up tasks for you to review and create in Jira.

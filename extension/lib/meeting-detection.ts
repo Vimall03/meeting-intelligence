@@ -1,19 +1,28 @@
 import type { MeetingStatus } from './types';
-import { meetingIdFromUrl } from './meeting-session';
+import { meetingIdFromUrl, meetingPlatformFromUrl } from './meeting-session.ts';
 
-export function detectMeeting(): MeetingStatus {
-  if (!meetingIdFromUrl(window.location.href)) {
+export function detectMeeting(url = window.location.href, page: Pick<Document, 'querySelectorAll'> = document): MeetingStatus {
+  if (!meetingIdFromUrl(url)) {
     return 'not-in-meeting';
   }
 
-  const labels = Array.from(document.querySelectorAll<HTMLElement>(
+  const labels = Array.from(page.querySelectorAll<HTMLElement>(
     'button, [role="button"], [aria-label], [data-tooltip], [title]',
-  )).flatMap((element) => [
+  )).filter((element) => !element.closest('[hidden], [aria-hidden="true"]') && element.getClientRects().length > 0).flatMap((element) => [
     element.getAttribute('aria-label'),
     element.getAttribute('data-tooltip'),
     element.getAttribute('title'),
     element.innerText,
   ]).map((label) => label?.replace(/\s+/g, ' ').trim().toLowerCase() ?? '').filter(Boolean);
+
+  if (meetingPlatformFromUrl(url) === 'zoom') {
+    // Waiting rooms and device previews can have a microphone and Leave button.
+    // Require the actual meeting toolbar, not just a meeting link or device UI.
+    const leave = labels.some((label) => /^(leave|end)( meeting)?(?:\b|,)/.test(label));
+    const audio = labels.some((label) => /^(mute|unmute|join audio|audio settings)(?:\b|,)/.test(label));
+    const controls = labels.some((label) => /^(participants|share screen|share|reactions|security|host tools|more)(?:\b|,)/.test(label));
+    return leave && audio && controls ? 'in-meeting' : 'not-in-meeting';
+  }
 
   const isPreJoin = labels.some((label) =>
     label.includes('join now') ||

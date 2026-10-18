@@ -1,15 +1,15 @@
 import { detectMeeting } from '../lib/meeting-detection';
-import { meetingIdFromUrl } from '../lib/meeting-session';
+import { meetingIdFromUrl, MEETING_MATCHES } from '../lib/meeting-session';
 import type { ExtensionMessage } from '../lib/types';
 
 export default defineContentScript({
-  matches: ['https://meet.google.com/*'],
+  matches: MEETING_MATCHES,
   runAt: 'document_idle',
   main(ctx) {
     const report = async () => {
       const status = detectMeeting();
       const meetingId = status === 'in-meeting' ? meetingIdFromUrl(window.location.href) : undefined;
-      // Meet has its own microphone permission and device controls. Its UI is
+      // Meeting sites have their own microphone and device controls. Their UI is
       // not evidence that this extension's independently captured mic failed.
       // Actual extension audio health is reported by the offscreen capture.
       const message: ExtensionMessage = {

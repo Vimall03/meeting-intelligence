@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  meetContentScriptFiles,
+  meetingContentScriptFiles,
   probeWithContentScriptRecovery,
 } from '../lib/content-script-recovery.ts';
 
@@ -14,7 +14,7 @@ const manifest = {
 };
 
 test('finds the generated Meet content script in the extension manifest', () => {
-  assert.deepEqual(meetContentScriptFiles(manifest), ['content-scripts/meet.js']);
+  assert.deepEqual(meetingContentScriptFiles(manifest, 'https://meet.google.com/abc-defg-hij'), ['content-scripts/meet.js']);
 });
 
 test('injects the current Meet script and retries a failed probe', async () => {
@@ -22,6 +22,7 @@ test('injects the current Meet script and retries a failed probe', async () => {
   const injected = [];
   const result = await probeWithContentScriptRecovery({
     manifest,
+    tabUrl: 'https://meet.google.com/abc-defg-hij',
     probe: async () => {
       probeCount += 1;
       if (probeCount === 1) throw new Error('Could not establish connection. Receiving end does not exist.');
@@ -39,6 +40,7 @@ test('does not inject when the first probe succeeds', async () => {
   let injected = false;
   const result = await probeWithContentScriptRecovery({
     manifest,
+    tabUrl: 'https://meet.google.com/abc-defg-hij',
     probe: async () => ({ status: 'not-in-meeting' }),
     inject: async () => { injected = true; },
   });

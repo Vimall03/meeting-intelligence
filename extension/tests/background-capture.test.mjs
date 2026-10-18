@@ -9,8 +9,8 @@ import * as permissions from '../lib/microphone-permission.ts';
 import * as mom from '../lib/mom.ts';
 import * as recovery from '../lib/content-script-recovery.ts';
 
-function harness({ deferAccess = false, invocationDenied = false, savedState, activeOffscreen = false, expireAccess = false, momMode = 'live_only', momFailure = false, userId = 'user' } = {}) {
-  const calls = [], requests = [], local = {}, session = savedState ? { state: savedState } : {};
+function harness({ deferAccess = false, invocationDenied = false, savedState, activeOffscreen = false, expireAccess = false, momMode = 'live_only', momFailure = false, userId = 'user', meetingUrl = 'https://meet.google.com/abc-defg-hij' } = {}) {
+  const calls = [], requests = [], offscreenStarts = [], local = {}, session = savedState ? { state: savedState } : {};
   let listener, signedOut, releaseAccess, active = activeOffscreen, offscreenExists = activeOffscreen;
   let clock = 0, issuedAt = 0, streams = 0, uuid = 0;
   let meetingStatus = 'in-meeting';
@@ -30,6 +30,7 @@ function harness({ deferAccess = false, invocationDenied = false, savedState, ac
         if (message.type === 'GET_OFFSCREEN_STATUS') return { active };
         if (message.type === 'STOP_OFFSCREEN') { active = false; return { ok: true }; }
         if (message.type === 'START_OFFSCREEN') {
+          offscreenStarts.push(message);
           // Model Chrome's single-use, short-lived IDs: setup after minting
           // must not be allowed to burn most of their lifetime.
           assert.ok(clock - issuedAt < 3000, 'tab stream ID expired before it was consumed');
@@ -46,8 +47,8 @@ function harness({ deferAccess = false, invocationDenied = false, savedState, ac
       session: { async get() { return session; }, async set(value) { Object.assign(session, value); } },
     },
     tabs: {
-      async get(id) { calls.push(`tab:${id}`); return { id, active: true, url: 'https://meet.google.com/abc-defg-hij' }; },
-      async sendMessage(id) { calls.push(`probe:${id}`); clock += 1000; return { status: meetingStatus, meetingId: 'abc-defg-hij' }; },
+      async get(id) { calls.push(`tab:${id}`); return { id, active: true, url: meetingUrl }; },
+      async sendMessage(id) { calls.push(`probe:${id}`); clock += 1000; return { status: meetingStatus, meetingId: meetings.meetingIdFromUrl(meetingUrl) }; },
       onRemoved: events(), onUpdated: events(), async remove() {},
     },
     scripting: { async executeScript() {} },
@@ -97,8 +98,8 @@ function harness({ deferAccess = false, invocationDenied = false, savedState, ac
       return { BACKEND_HTTP_BASE_URL: 'https://example.com', isGoogleDriveCallbackUrl: () => false };
     },
   });
-  return { send, calls, requests, local, releaseAccess, signOut: () => signedOut(), state: () => session.state,
-    closeTab: id => chrome.tabs.onRemoved.fire(id), navigateTab: (id, url) => chrome.tabs.onUpdated.fire(id, { url }, {}),
+  return { send, calls, requests, offscreenStarts, local, releaseAccess, signOut: () => signedOut(), state: () => session.state,
+    closeTab: id => chrome.tabs.onRemoved.fire(id), navigateTab: (id, url) => { meetingUrl = url; chrome.tabs.onUpdated.fire(id, { url }, {}); },
     leaveMeeting: () => { meetingStatus = 'not-in-meeting'; },
     get streams() { return streams; }, get active() { return active; } };
 }
@@ -280,4 +281,27 @@ test('changing preferences during capture preserves the active meeting mode', as
   assert.equal(h.active,true);
   assert.equal(h.streams,1);
   await h.send(stop);
+});
+
+
+test('Zoom starts with a namespaced room and switching to another room releases capture', async () => {
+  const h = harness({ meetingUrl: 'https://app.zoom.us/wc/12345678901/join?pwd=private', momMode: 'both' });
+  assert.equal((await h.send(start)).ok, true);
+  assert.equal(h.offscreenStarts[0].roomId, 'zoom:12345678901');
+  assert.equal(h.offscreenStarts[0].mode, 'both');
+  h.navigateTab(7, 'https://us02web.zoom.us/wc/12345678901/join?pwd=rotated');
+  await tick();
+  assert.equal(h.active, true, 'same Zoom room survives host and query changes');
+  h.navigateTab(7, 'https://app.zoom.us/wc/98765432101/join');
+  await tick(); await tick();
+  assert.equal(h.active, false);
+});
+
+test('Zoom waiting-room status cannot start microphone or tab capture', async () => {
+  const h = harness({ meetingUrl: 'https://app.zoom.us/wc/12345678901/join' });
+  h.leaveMeeting();
+  const response = await h.send(start);
+  assert.equal(response.ok, false);
+  assert.equal(h.streams, 0);
+  assert.equal(h.active, false);
 });

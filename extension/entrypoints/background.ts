@@ -109,7 +109,7 @@ async function ensureOffscreen() {
     if (!offscreenCreation) offscreenCreation = chrome.offscreen.createDocument({
       url: OFFSCREEN_URL,
       reasons: [chrome.offscreen.Reason.USER_MEDIA],
-      justification: 'Capture only the authorized Meet tab audio and microphone.',
+      justification: 'Capture only the authorized meeting tab audio and microphone.',
     }).finally(() => { offscreenCreation = undefined; });
     await offscreenCreation;
   }
@@ -143,6 +143,7 @@ function recordMeetingStatus(
 async function checkMeetingTab(tabId: number) {
   let connected = false;
   try {
+    const tab = await chrome.tabs.get(tabId);
     const response = await probeWithContentScriptRecovery({
       probe: () => chrome.tabs.sendMessage(tabId, { type: 'GET_MEETING_STATUS' }) as Promise<{
         status?: ExtensionState['meetingStatus']; meetingId?: string;
@@ -151,6 +152,7 @@ async function checkMeetingTab(tabId: number) {
         await chrome.scripting.executeScript({ target: { tabId }, files });
       },
       manifest: chrome.runtime.getManifest(),
+      tabUrl: tab.url,
     }) as {
       status?: ExtensionState['meetingStatus']; meetingId?: string;
     };
@@ -317,7 +319,7 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
     }
     const permissionTabId = sender.tab?.id;
     if (message.granted && permissionTabId !== undefined) {
-      // Let the result reach the open side panel before returning focus to Meet.
+      // Let the result reach the open side panel before returning focus to the meeting.
       setTimeout(() => { void chrome.tabs.remove(permissionTabId).catch(() => undefined); }, 600);
     }
     return { ok: true };

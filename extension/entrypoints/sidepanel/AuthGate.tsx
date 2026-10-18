@@ -59,7 +59,7 @@ export function AuthGate({ children }: { children: (session: PublicSession, acco
     </form>
     {sent && <div className="auth-links"><button disabled={busy || remaining > 0} onClick={() => void action('AUTH_REQUEST')}>{remaining ? `Resend in ${remaining}s` : 'Send a new code'}</button><button disabled={busy} onClick={() => { setSent(false); setCode(''); }}>Change email</button></div>}
     {error && <p className="auth-error" role="alert">{userError(error, 'MI-AUTH-104')}</p>}
-    <p className="auth-hint">Live listening currently supports Google Meet.</p>
+    <p className="auth-hint">Google Meet is supported. Zoom in your browser is available as a preview.</p>
     <PolicyLinks />
   </main>;
 }

@@ -8,7 +8,7 @@ import { authenticatedFetch as fetch } from '../../lib/http';
 import { problem, userError, httpProblem, microphoneProblem } from '../../lib/user-messages';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { ExtensionMessage, ExtensionState, MeetingStatus, TaskSuggestionItem } from '../../lib/types';
-import { isTimelineForMeeting, meetingIdFromUrl } from '../../lib/meeting-session';
+import { isTimelineForMeeting, meetingIdFromUrl, meetingPlatformFromUrl } from '../../lib/meeting-session';
 import { visibleTimelineItems } from '../../lib/timeline';
 import { loadJiraProjects, submitJiraTask } from '../../lib/jira-tasks';
 import type { JiraProject } from '../../lib/jira-tasks';
@@ -147,9 +147,9 @@ const initialState: ExtensionState = {
   backendConnected: false,
 };
 
-function isMeetTab(tab: chrome.tabs.Tab | undefined) {
+function isMeetingTab(tab: chrome.tabs.Tab | undefined) {
   try {
-    return new URL(tab?.url ?? '').hostname === 'meet.google.com';
+    return meetingPlatformFromUrl(tab?.url) !== undefined;
   } catch {
     return false;
   }
@@ -274,7 +274,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
 
       let meetingStatus: MeetingStatus = 'not-in-meeting';
       let contentScriptMissing = false;
-      if (isMeetTab(tab)) {
+      if (isMeetingTab(tab)) {
         try {
           const result = await chrome.runtime.sendMessage({ type: 'CHECK_MEETING_TAB', tabId: tab.id }) as {
             status?: MeetingStatus; contentScriptMissing?: boolean;
@@ -518,7 +518,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
 
   useEffect(() => {
     const tabId = activeTab?.id;
-    if (!tabId || !isMeetTab(activeTab) || state.meetingStatus !== 'in-meeting' || microphone !== 'granted') {
+    if (!tabId || !isMeetingTab(activeTab) || state.meetingStatus !== 'in-meeting' || microphone !== 'granted') {
       setReadyTabId(undefined);
       return;
     }
@@ -688,17 +688,17 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
   const running = state.captureStatus === 'capturing' || state.captureStatus === 'connecting';
   const currentMinutes = state.minutes?.find(item => item.captureId === state.captureSessionId);
   const mode = running ? currentMinutes?.mode ?? state.captureMode ?? 'live_only' : state.momSettings?.mode ?? 'live_only';
-  const displayMinutes = currentMinutes ?? state.minutes?.find(item => item.roomId === meetingIdFromUrl(activeTab?.url)) ?? (!isMeetTab(activeTab) ? state.minutes?.[0] : undefined);
+  const displayMinutes = currentMinutes ?? state.minutes?.find(item => item.roomId === meetingIdFromUrl(activeTab?.url)) ?? (!isMeetingTab(activeTab) ? state.minutes?.[0] : undefined);
   const capturingHere = running && state.captureTabId === activeTab?.id;
   const capturingElsewhere = running && !capturingHere;
-  const inMeeting = isMeetTab(activeTab) && state.meetingStatus === 'in-meeting';
+  const inMeeting = isMeetingTab(activeTab) && state.meetingStatus === 'in-meeting';
   const statusTitle = capturingHere
     ? state.captureStatus === 'connecting' ? 'Getting ready to listen' : 'Listening to your meeting'
     : capturingElsewhere ? 'Listening in another tab'
       : inMeeting ? microphone === 'checking' ? 'Checking microphone access'
         : microphone !== 'granted' ? 'Set up your microphone'
           : readyTabId !== activeTab?.id ? 'Preparing to listen' : 'Ready to listen'
-        : state.meetingStatus === 'unknown' && isMeetTab(activeTab) ? 'Connect this Meet tab'
+        : state.meetingStatus === 'unknown' && isMeetingTab(activeTab) ? 'Connect this meeting tab'
           : 'Ready when you are';
   const timelineItems = isTimelineForMeeting(
     state.timelineOwner,
@@ -748,7 +748,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
           <strong>{statusTitle}</strong>
           <span>{running
             ? state.backendConnected ? mode === 'mom_only' ? 'Capturing key points for your email recap' : mode === 'both' ? 'Live assistance and your email recap are on' : 'Finding useful context and next steps' : 'Connecting…'
-            : inMeeting ? 'Listen to the call and your microphone' : isMeetTab(activeTab) ? 'Join the call to start listening' : 'Live listening currently supports Google Meet. More platforms are planned.'}</span>
+            : inMeeting ? meetingPlatformFromUrl(activeTab?.url) === 'zoom' ? 'Zoom browser preview. Join computer audio to include everyone.' : 'Listen to the call and your microphone' : isMeetingTab(activeTab) ? 'Join the call to start listening' : 'Use Google Meet or the Zoom browser preview. Zoom desktop calls aren’t supported.'}</span>
         </div>
       </section>
 
@@ -765,7 +765,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
             <UiIcon name="microphone" size={18} />
             {busy ? 'Starting…' : readyTabId !== activeTab?.id && inMeeting && microphone === 'granted' ? 'Preparing…' : state.captureStatus === 'error' ? 'Try listening again' : 'Start listening'}
           </button>
-        {(!inMeeting || microphone === 'checking' || microphone === 'granted') && <p className="action-hint">{!inMeeting ? 'Join a Google Meet call to start listening.' : microphone === 'checking' ? 'Checking microphone access…' : 'You control when listening starts and stops.'}</p>}
+        {(!inMeeting || microphone === 'checking' || microphone === 'granted') && <p className="action-hint">{!inMeeting ? 'Join Google Meet or a Zoom call in your browser to start listening.' : microphone === 'checking' ? 'Checking microphone access…' : 'You control when listening starts and stops.'}</p>}
       </div>}
       </div>
 
@@ -789,7 +789,7 @@ function MeetingApp({ userId, accountControls, accountNotice }: { userId: string
         </div>
         <div className="timeline-scroll" ref={timelineScrollRef}>
           {timelineItems.length === 0 ? (
-            <div className="timeline-empty"><span className="empty-symbol" aria-hidden="true"><UiIcon name={running ? 'waveform' : 'headphones'} size={22} /></span><strong>{running ? 'Listening for context' : 'Your meeting activity appears here'}</strong><p>{running ? 'Related files and suggested tasks will appear as you talk.' : 'Start listening in Google Meet to find related work and follow-ups.'}</p></div>
+            <div className="timeline-empty"><span className="empty-symbol" aria-hidden="true"><UiIcon name={running ? 'waveform' : 'headphones'} size={22} /></span><strong>{running ? 'Listening for context' : 'Your meeting activity appears here'}</strong><p>{running ? 'Related files and suggested tasks will appear as you talk.' : 'Start listening in Google Meet or Zoom in your browser to find related work and follow-ups.'}</p></div>
           ) : (
             <ol className="timeline-list">
               {timelineItems.map((item) => (

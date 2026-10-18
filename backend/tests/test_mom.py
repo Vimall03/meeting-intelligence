@@ -118,6 +118,29 @@ class MomTests(unittest.TestCase):
         sweep_repository(self.repo)
         self.assertEqual(self.repo.queue_client.messages, [])
 
+    def test_zoom_rejoin_and_recaps_use_isolated_platform_room_identity(self):
+        zoom = self.begin(room='zoom:12345678901')
+        self.record(zoom, 'Review the synthetic Zoom follow-up.')
+        self.repo.detach(zoom)
+        self.repo.now[0] += 30
+        joined = self.begin('zoom-rejoin', room='zoom:12345678901')
+        self.assertEqual(joined['sessionId'], zoom['sessionId'])
+        self.assertNotEqual(self.begin('meet-capture')['sessionId'], zoom['sessionId'])
+        self.assertNotEqual(self.begin('other-zoom', room='zoom:98765432101')['sessionId'], zoom['sessionId'])
+        self.repo.detach(joined, finish=True)
+        ses = Ses()
+        self.processor(ses).process(joined['pk'])
+        self.assertEqual(self.repo.get(joined['pk'])['state'], 'sent')
+        self.assertEqual(len(ses.calls), 1)
+        self.assertFalse(any(key.startswith(self.repo.prefix(joined)) for key in self.repo.s3.objects))
+
+    def test_zoom_room_validation_rejects_passcodes_and_untrusted_identifiers(self):
+        for room in ['zoom:123', 'zoom:123456789012', 'zoom:12345678901?pwd=secret',
+                     'zoom:12345678901#other', 'https://zoom.us/j/12345678901', 'teams:12345678901']:
+            with self.subTest(room=room), self.assertRaises(MomError) as error:
+                self.begin(room=room)
+            self.assertEqual(error.exception.code, 'MI-MOM-003')
+
     def test_grace_boundary_creates_new_session_and_old_is_ready(self):
         first = self.begin(); self.repo.detach(first)
         self.repo.now[0] += 600
@@ -307,10 +330,16 @@ class MomRouteTests(unittest.IsolatedAsyncioTestCase):
 
 class MomStreamTests(unittest.IsolatedAsyncioTestCase):
     async def test_mom_only_does_not_open_connectors_or_run_live_models_and_drains_end(self):
+        await self.check_mom_stream('abc-defg-hij')
+
+    async def test_zoom_stream_authenticates_drains_audio_and_saves_a_recoverable_recap(self):
+        await self.check_mom_stream('zoom:12345678901')
+
+    async def check_mom_stream(self, room):
         db=MemoryStore();repo=MemoryRepository();repo.set_preferences('A','mom_only','UTC','verified-A')
         class Socket(RecoverySocket):
             async def receive_text(self):
-                payload=json.loads(await super().receive_text());payload['roomId']='abc-defg-hij';return json.dumps(payload)
+                payload=json.loads(await super().receive_text());payload['roomId']=room;return json.dumps(payload)
         frames=window(1,'first')+window(2,'second')+[{'type':'websocket.receive','text':json.dumps({'type':'finish','lastSequence':2})}]
         ws=Socket(db,frames);ws.app.state.mom=repo
         async def transcribe_audio(audio):
@@ -323,6 +352,7 @@ class MomStreamTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(route.meeting_stream(ws),3)
         session=next(row for row in repo.rows.values() if row.get('sessionId'))
         self.assertEqual(session['state'],'ready')
+        self.assertEqual(session['roomId'], room)
         self.assertEqual([line.split('] ',1)[1] for line in transcript(repo,session).splitlines()],['first','second'])
         self.assertTrue(any(message['type']=='meeting_segment_ended' and message['ack']==2 for message in ws.sent))
         recovery=db.rows['USER#A#MEETING#meeting-1']

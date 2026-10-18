@@ -1,11 +1,12 @@
 {
   "name": "meeting-intelligence-extension",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wxt",
     "build": "wxt build",
+    "package": "npm run build && python3 scripts/package.py",
     "typecheck": "tsc --noEmit",
     "test:session": "node --experimental-strip-types --test tests/*.test.mjs"
   },
