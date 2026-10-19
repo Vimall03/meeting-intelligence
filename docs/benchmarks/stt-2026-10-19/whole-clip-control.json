@@ -1,0 +1,116 @@
+{
+  "purpose": "Offline whole-clip accuracy control; not a live latency comparison",
+  "rows": [
+    {
+      "clip": "plain-us",
+      "category": "synthetic_clean",
+      "substitutions": 1,
+      "deletions": 0,
+      "insertions": 0,
+      "reference_words": 33,
+      "wer": 0.030303030303030304,
+      "text": "Please send the revised launch plan to Maya before Friday afternoon. The design is approved, but the payment team still need an owner. We will review the results together at the next meeting.",
+      "cost_usd": 0.001125
+    },
+    {
+      "clip": "technical-uk",
+      "category": "synthetic_clean",
+      "substitutions": 0,
+      "deletions": 0,
+      "insertions": 0,
+      "reference_words": 29,
+      "wer": 0.0,
+      "text": "The authentication callback fails when the session token expires. Add exponential backoff and an idempotency key before retrying the request. Keep the release blocked until the integration tests pass.",
+      "cost_usd": 0.001275
+    },
+    {
+      "clip": "numbers-india",
+      "category": "synthetic_clean",
+      "substitutions": 0,
+      "deletions": 0,
+      "insertions": 0,
+      "reference_words": 34,
+      "wer": 0.0,
+      "text": "The budget is $14,000, not $40,000. We need 17 licenses for the engineering team by November 21st. Move the deadline from Tuesday to Thursday and keep the same owner.",
+      "cost_usd": 0.00135
+    },
+    {
+      "clip": "corrections-australia",
+      "category": "synthetic_clean",
+      "substitutions": 0,
+      "deletions": 0,
+      "insertions": 0,
+      "reference_words": 36,
+      "wer": 0.0,
+      "text": "Do not create another task for the checkout issue because it already exists. I said the client approved the design, not the deployment. Actually, hold the release until Priya confirms that the database migration is safe.",
+      "cost_usd": 0.00135
+    },
+    {
+      "clip": "technical-noise",
+      "category": "synthetic_noisy",
+      "substitutions": 0,
+      "deletions": 0,
+      "insertions": 0,
+      "reference_words": 29,
+      "wer": 0.0,
+      "text": "The authentication callback fails when the session token expires. Add exponential backoff and an idempotency key before retrying the request. Keep the release blocked until the integration tests pass.",
+      "cost_usd": 0.001275
+    },
+    {
+      "clip": "alternating-voices",
+      "category": "synthetic_clean",
+      "substitutions": 0,
+      "deletions": 0,
+      "insertions": 0,
+      "reference_words": 35,
+      "wer": 0.0,
+      "text": "Can we ship the updated dashboard on Friday? Only if the accessibility review is complete and the search issue is fixed. Then let us keep Monday as the delivery date and tell the client today.",
+      "cost_usd": 0.0012
+    },
+    {
+      "clip": "librispeech-6930-75918-0000",
+      "category": "human_read_speech",
+      "substitutions": 0,
+      "deletions": 0,
+      "insertions": 0,
+      "reference_words": 8,
+      "wer": 0.0,
+      "text": "Concord returned to its place amidst the tents.",
+      "cost_usd": 0.000375
+    },
+    {
+      "clip": "librispeech-6930-76324-0019",
+      "category": "human_read_speech",
+      "substitutions": 0,
+      "deletions": 0,
+      "insertions": 0,
+      "reference_words": 7,
+      "wer": 0.0,
+      "text": "Now let's dust the furniture and pictures.",
+      "cost_usd": 0.0003
+    },
+    {
+      "clip": "librispeech-1320-122612-0000",
+      "category": "human_read_speech",
+      "substitutions": 0,
+      "deletions": 0,
+      "insertions": 0,
+      "reference_words": 41,
+      "wer": 0.0,
+      "text": "Since the period of our tale, the active spirit of the country has surrounded it with a belt of rich and thriving settlements, though none but the hunter or the savage is ever known even now to penetrate its wild recesses.",
+      "cost_usd": 0.001125
+    },
+    {
+      "clip": "librispeech-7729-102255-0039",
+      "category": "human_read_speech",
+      "substitutions": 0,
+      "deletions": 0,
+      "insertions": 0,
+      "reference_words": 18,
+      "wer": 0.0,
+      "text": "The inmates being removed, at the appointed hour, a few cannon balls were fired through the stone walls.",
+      "cost_usd": 0.0006
+    }
+  ],
+  "aggregate_wer": 0.003703703703703704
+}

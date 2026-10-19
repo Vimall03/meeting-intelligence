@@ -33,6 +33,7 @@ from app.services.meeting_context_service import MeetingContextService, JevConte
 from app.services.meeting_intent_service import decide_meeting_intent
 from app.services.meeting_timeline_service import MeetingTimelineService
 from app.services.openrouter_stt_service import transcribe_realtime_chunk
+from app.services.streaming_stt import AmazonStreamingTranscription, StreamingTranscriptionError
 
 router = APIRouter()
 
@@ -98,6 +99,7 @@ async def _meeting_stream(websocket: WebSocket):
     mom_repo = None
     mom_attachment = None
     live_enabled = True
+    streaming = False
     try:
         hello = await asyncio.wait_for(websocket.receive_text(), timeout=10)
         if len(hello) > 512:
@@ -105,10 +107,19 @@ async def _meeting_stream(websocket: WebSocket):
         import json
         payload = json.loads(hello)
         principal = await consume_ticket(payload.get('ticket'), db)
+        streaming = payload.get('audioFormat') == 'pcm_s16le_16000'
+        if payload.get('audioFormat') is not None and (not streaming or not settings.streaming_stt_enabled):
+            raise StreamingTranscriptionError()
+        if streaming and (not payload.get('meetingId') or payload.get('lastAck', 0) != 0):
+            raise MeetingResumeExpired()
         set_log_context(user_id=principal.sub)
         session = MeetingSessions(db, principal, payload.get('meetingId') or secrets.token_hex(16))
         set_log_context(meeting_id=session.session_id)
         restored = await session.acquire()
+        # Streaming frame receipts are not durable transcript acknowledgements.
+        # Never pretend the legacy replay protocol can restore provider state.
+        if (streaming and restored) or (not streaming and restored.get('transport') == 'pcm_s16le_16000'):
+            raise MeetingResumeExpired()
         last_ack = payload.get('lastAck', 0)
         if not isinstance(last_ack, int) or isinstance(last_ack, bool) or last_ack < 0 or last_ack > restored.get('ack', 0):
             raise MeetingResumeExpired()
@@ -142,7 +153,7 @@ async def _meeting_stream(websocket: WebSocket):
         if registry:
             registry.sockets.discard(websocket)
         code = 4409 if isinstance(exc, MeetingResumeExpired) else 4410 if isinstance(exc, MeetingBusy) else 4401 if isinstance(exc, HTTPException) and exc.status_code == 401 else 1013
-        reason = exc.code if isinstance(exc, MomError) else 'MI-CON-007' if code == 4409 else 'MI-AUTH-105' if code == 4401 else 'MI-CON-004'
+        reason = exc.code if isinstance(exc, MomError) else 'MI-STT-001' if isinstance(exc, StreamingTranscriptionError) else 'MI-CON-007' if code == 4409 else 'MI-AUTH-105' if code == 4401 else 'MI-CON-004'
         log_event('meeting.rejected', level=logging.WARNING, **{**error_fields(exc), 'close_code': code, 'support_code': reason})
         await websocket.close(code=code, reason=reason)
         return
@@ -168,7 +179,8 @@ async def _meeting_stream(websocket: WebSocket):
         try:
             wrote = await checkpoints.save({'ack': ack, 'audioEnd': transcribed_audio_end,
                 'transcript': transcript_text, 'context': context_state(meeting_context),
-                'events': event_state(event_service), 'timeline': timeline.snapshot(), 'jobs': jobs})
+                'events': event_state(event_service), 'timeline': timeline.snapshot(), 'jobs': jobs,
+                **({'transport': 'pcm_s16le_16000'} if streaming else {})})
         except Exception as exc:
             log_event('meeting.checkpoint.failed', level=logging.WARNING,
                       **{**error_fields(exc), 'support_code': 'MI-CON-004'})
@@ -198,6 +210,14 @@ async def _meeting_stream(websocket: WebSocket):
     transcribed_audio_end = restored.get('audioEnd', 0.0)
     transcript_text = restored.get('transcript', '')
     empty_audio_seconds = 0.0
+    streaming_session = None
+    streaming_updates = None
+    streaming_update_task = None
+    streaming_finish_task = None
+    streaming_ended = False
+    streaming_final_sequence = 0
+    frame_rate_started = time.monotonic()
+    frame_rate_count = 0
     meeting_context = MeetingContextService(
         window_seconds=settings.meeting_context_window_seconds,
         turn_gap_seconds=settings.meeting_context_turn_gap_seconds,
@@ -317,7 +337,7 @@ async def _meeting_stream(websocket: WebSocket):
         ]
         if mom_attachment:
             await asyncio.to_thread(mom_repo.append, mom_attachment, session.session_id,
-                transcription_sequence, new_segments)
+                streaming_final_sequence if streaming else transcription_sequence, new_segments)
         transcribed_audio_end += transcript["audio_duration"]
         log_event('meeting.transcription.accepted', sequence=transcription_sequence,
             audio_start_seconds=window_start, audio_end_seconds=transcribed_audio_end,
@@ -333,7 +353,7 @@ async def _meeting_stream(websocket: WebSocket):
         if new_segments and live_enabled:
             accepted_segments = meeting_context.add_segments(new_segments)
             if accepted_segments:
-                ack = transcription_sequence
+                if not streaming: ack = transcription_sequence
                 jev_evaluation_requested = True
                 new_text = " ".join(
                     segment.text for segment in accepted_segments
@@ -346,7 +366,7 @@ async def _meeting_stream(websocket: WebSocket):
                             now=time.monotonic(), background_context=meeting_context.background_text())
                     )
 
-        ack = transcription_sequence
+        if not streaming: ack = transcription_sequence
         if send:
             await safe_send({"type": "transcription_state", "transcript": transcript_text, "warning": warning})
             await safe_send({'type': 'audio_ack', 'sequence': ack})
@@ -361,8 +381,17 @@ async def _meeting_stream(websocket: WebSocket):
     finish_minutes = False
     last_mom_touch = 0.0
     try:
+        if streaming:
+            streaming_started = time.perf_counter()
+            streaming_session = await AmazonStreamingTranscription(region=settings.aws_region,
+                language=settings.streaming_stt_language).start()
+            log_event('meeting.streaming.connected', provider='amazon-transcribe', stage='stt',
+                duration_ms=round((time.perf_counter()-streaming_started)*1000,2))
+            streaming_updates = streaming_session.updates().__aiter__()
+            streaming_update_task = asyncio.create_task(anext(streaming_updates))
         await safe_send({'type': 'auth_ready', 'expiresAt': principal.expires,
-            'expiresIn': max(0, principal.expires - int(time.time())), 'ack': ack, 'meetingId': session.session_id})
+            'expiresIn': max(0, principal.expires - int(time.time())), 'ack': ack, 'meetingId': session.session_id,
+            **({'audioFormat': 'pcm_s16le_16000'} if streaming else {})})
         await safe_send(timeline.snapshot())
         if mom_attachment:
             await safe_send({'type': 'mom_session', 'sessionId': mom_attachment['sessionId'],
@@ -379,6 +408,10 @@ async def _meeting_stream(websocket: WebSocket):
                     work.add(transcription_task)
                 if jev_task:
                     work.add(jev_task)
+                if streaming_update_task:
+                    work.add(streaming_update_task)
+                if streaming_finish_task:
+                    work.add(streaming_finish_task)
                 if not work:
                     ready = set()
                 else:
@@ -392,8 +425,14 @@ async def _meeting_stream(websocket: WebSocket):
                 if message.get('text') is not None:
                     if len(message['text']) > 512:
                         raise failure()
-                    await db.limit(principal.sub, 'meeting-controls', 120, 60)
                     control = json.loads(message['text'])
+                    if streaming and control.get('type') == 'audio':
+                        if time.monotonic() - frame_rate_started >= 1:
+                            frame_rate_started, frame_rate_count = time.monotonic(), 0
+                        frame_rate_count += 1
+                        if frame_rate_count > 12: raise failure('MI-AUTH-102', 429)
+                    else:
+                        await db.limit(principal.sub, 'meeting-controls', 120, 60)
                     if control.get('type') == 'ping':
                         last_client_ping = time.monotonic()
                         await safe_send({'type': 'pong'})
@@ -403,7 +442,7 @@ async def _meeting_stream(websocket: WebSocket):
                             raise ValueError('Invalid audio sequence')
                         audio_sequence = value
                     elif control.get('type') in ('end', 'finish'):
-                        if not mom_attachment:
+                        if not mom_attachment and not streaming:
                             raise WebSocketDisconnect()
                         final_sequence = control.get('lastSequence')
                         if not isinstance(final_sequence, int) or isinstance(final_sequence, bool) or final_sequence != received_sequence or audio_sequence is not None:
@@ -418,9 +457,14 @@ async def _meeting_stream(websocket: WebSocket):
                         session.principal = renewed
                         log_event('meeting.auth.renewed')
                         await safe_send({'type': 'auth_ready', 'expiresAt': principal.expires,
-                            'expiresIn': max(0, principal.expires - int(time.time())), 'ack': ack})
+                            'expiresIn': max(0, principal.expires - int(time.time())), 'ack': ack,
+                            **({'audioFormat': 'pcm_s16le_16000'} if streaming else {})})
                 elif message.get('bytes'):
-                    await ensure_active(principal, db)
+                    if not streaming: await ensure_active(principal, db)
+                    if streaming and streaming_session.audio_seconds >= 21600:
+                        raise StreamingTranscriptionError()
+                    if streaming and (len(message['bytes']) > 6400 or len(message['bytes']) % 2):
+                        raise StreamingTranscriptionError()
                     if len(message['bytes']) > 2_000_000 or len(pending_audio_windows) >= 20:
                         raise failure('MI-AUTH-102', 429)
                     sequence = audio_sequence if sequenced else received_sequence + 1
@@ -434,13 +478,39 @@ async def _meeting_stream(websocket: WebSocket):
                 pass
 
             now = time.monotonic()
+            if streaming_update_task and streaming_update_task.done():
+                completed_update, streaming_update_task = streaming_update_task, None
+                try:
+                    update = completed_update.result()
+                except StopAsyncIteration:
+                    streaming_ended = True
+                    if not ending: raise StreamingTranscriptionError()
+                else:
+                    if update.final:
+                        streaming_final_sequence += 1
+                        # The provider times refer to this connection's continuous
+                        # audio, while the shared downstream path expects deltas.
+                        duration = max(0, update.end - transcribed_audio_end)
+                        await accept_transcript({'audio_duration': duration,
+                            'segments': [{'start': max(0, update.start-transcribed_audio_end),
+                                'end': max(0, update.end-transcribed_audio_end), 'text': update.text}]})
+                    else:
+                        # Replaceable previews are never persisted or sent to intent/recap processing.
+                        await websocket.send_json({'type':'transcription_partial', 'text':update.text})
+                    streaming_update_task = asyncio.create_task(anext(streaming_updates))
+            if streaming_finish_task and streaming_finish_task.done():
+                streaming_finish_task.result()
+                streaming_finish_task = None
             if mom_attachment and now - last_mom_touch >= 5:
                 await asyncio.to_thread(mom_repo.touch, mom_attachment)
                 last_mom_touch = now
             if ending and transcription_task is None and not pending_audio_windows:
-                await safe_send({'type': 'meeting_segment_ended', 'ack': ack, 'minutesFinalizing': finish_minutes})
-                close_reason = 'finished' if finish_minutes else 'stopped'
-                break
+                if streaming and not streaming_session.closed:
+                    streaming_finish_task = asyncio.create_task(streaming_session.finish())
+                if not streaming or streaming_ended:
+                    await safe_send({'type': 'meeting_segment_ended', 'ack': ack, 'minutesFinalizing': finish_minutes})
+                    close_reason = 'finished' if finish_minutes else 'stopped'
+                    break
             if sequenced and not ending and now - last_client_ping > 50:
                 close_reason = 'heartbeat_timeout'
                 log_event('meeting.heartbeat.timeout', level=logging.WARNING, close_code=1013, support_code='MI-CON-004')
@@ -466,7 +536,13 @@ async def _meeting_stream(websocket: WebSocket):
                     await websocket.close(code=1013, reason='MI-CON-004')
                     break
                 else:
-                    await accept_transcript(transcript, elapsed=latency)
+                    if streaming:
+                        ack = transcription_sequence
+                        # Receipt only, not a resumable commit. Streaming reconnect
+                        # is intentionally rejected until a durable audio journal exists.
+                        await websocket.send_json({'type': 'audio_ack', 'sequence': ack})
+                    else:
+                        await accept_transcript(transcript, elapsed=latency)
 
             if (
                 transcription_task is None
@@ -474,7 +550,7 @@ async def _meeting_stream(websocket: WebSocket):
             ):
                 transcription_started_at = now
                 transcription_sequence, audio_window, queued_at = pending_audio_windows.popleft()
-                transcription_task = asyncio.create_task(
+                transcription_task = asyncio.create_task(streaming_session.send(audio_window) if streaming else
                     observe_operation('stt', transcribe_snapshot(audio_window),
                         sequence=transcription_sequence, model=settings.openrouter_stt_model,
                         audio_bytes=len(audio_window), queue_depth=len(pending_audio_windows),
@@ -700,6 +776,10 @@ async def _meeting_stream(websocket: WebSocket):
                     )
             # Changed work is captured before the next receive can suspend.
             # Heartbeats/outputs also checkpoint, so no per-loop extra write is needed.
+    except StreamingTranscriptionError:
+        close_reason = 'streaming_interrupted'
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1013, reason='MI-STT-001')
     except MomError as exc:
         close_reason = 'minutes_interrupted'
         log_event('meeting.interrupted', level=logging.WARNING, reason=close_reason, support_code=exc.code)
@@ -732,7 +812,7 @@ async def _meeting_stream(websocket: WebSocket):
             receive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await receive_task
-        if mom_attachment:
+        if mom_attachment and not streaming:
             async def drain_received_audio():
                 nonlocal transcription_task, transcription_sequence
                 while transcription_task or pending_audio_windows:
@@ -754,6 +834,17 @@ async def _meeting_stream(websocket: WebSocket):
             transcription_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await transcription_task
+        if streaming_update_task:
+            streaming_update_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception): await streaming_update_task
+        if streaming_finish_task:
+            streaming_finish_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception): await streaming_finish_task
+        if streaming_session:
+            with contextlib.suppress(Exception): await streaming_session.finish()
+            log_event('meeting.streaming.closed', provider='amazon-transcribe', stage='stt',
+                audio_seconds=round(streaming_session.audio_seconds,3), ack=ack,
+                outcome='completed' if streaming_ended else 'interrupted')
         if jev_task:
             jev_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -778,7 +869,9 @@ async def _meeting_stream(websocket: WebSocket):
         await session.release()
         if mom_attachment:
             with contextlib.suppress(Exception):
-                await asyncio.to_thread(mom_repo.detach, mom_attachment, finish=finish_minutes and ack == received_sequence, incomplete=ack != received_sequence)
+                await asyncio.to_thread(mom_repo.detach, mom_attachment,
+                    finish=finish_minutes and ack == received_sequence and (not streaming or streaming_ended),
+                    incomplete=ack != received_sequence or (streaming and not streaming_ended))
         log_event('meeting.disconnected', reason=close_reason, ack=ack, pending_jobs=len(jobs),
                   duration_ms=round((time.perf_counter() - connection_started) * 1000, 2),
                   checkpoint_count=checkpoint_count, checkpoint_total_ms=round(checkpoint_total_ms, 2),

@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     extension_origin: str = ""
     
     meeting_context_window_seconds: float = 45.0
+    streaming_stt_enabled: bool = False
+    streaming_stt_language: str = 'en-US'
     meeting_background_window_seconds: float = Field(default=180.0, gt=0)
     meeting_context_turn_gap_seconds: float = 12.0
     openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")

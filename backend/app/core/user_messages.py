@@ -5,6 +5,7 @@ return provider exception text to a person. New error pages must use this catalo
 """
 
 MESSAGES = {
+    "MI-STT-001": "We couldn’t continue listening. Stop listening and try again.",
     "MI-MOM-001": "Meeting minutes aren’t available yet. Try again later.",
     "MI-MOM-002": "Choose a valid meeting assistance option and time zone.",
     "MI-MOM-003": "Update Meeting Intelligence before using meeting minutes in Google Meet.",

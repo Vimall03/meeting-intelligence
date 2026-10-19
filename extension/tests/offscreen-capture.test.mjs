@@ -5,8 +5,9 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 
-function harness({ failInitialName, failReplacementName, permissionState = 'prompt', deferReplacement = false, deferFirstClose = false, deferFirstRecorderStop = false, acknowledge = true, momMode, autoEnd = true, clock = { now: Date.now() } } = {}) {
+function harness({ failInitialName, failReplacementName, permissionState = 'prompt', deferReplacement = false, deferFirstClose = false, deferFirstRecorderStop = false, acknowledge = true, momMode, autoEnd = true, streaming = false, deferPcmFinish = false, clock = { now: Date.now() } } = {}) {
   const messages = [], timeouts = new Map(), intervals = new Map(), sockets = [], recorders = [], contexts = [];
+  const pcmCaptures = [];
   let listener, timer = 0, serverAck = 0;
   class Clock extends Date { static now() { return clock.now; } }
   const track = () => ({ readyState: 'live', muted: false, enabled: true, stop() { this.readyState = 'ended'; } });
@@ -26,7 +27,8 @@ function harness({ failInitialName, failReplacementName, permissionState = 'prom
       if (typeof value === 'string') {
         const control = JSON.parse(value); this.controls.push(control);
         if (control.type === 'authenticate') queueMicrotask(() => {
-          this.onmessage?.({ data: JSON.stringify({ type: 'auth_ready', ack: serverAck, expiresAt: Math.floor(Date.now() / 1000) + 900, expiresIn: 900 }) });
+          this.onmessage?.({ data: JSON.stringify({ type: 'auth_ready', ack: serverAck, expiresAt: Math.floor(Date.now() / 1000) + 900, expiresIn: 900,
+            ...(streaming ? {audioFormat:'pcm_s16le_16000'} : {}) }) });
           if (momMode) this.onmessage?.({ data: JSON.stringify({ type: 'mom_session', sessionId: 'a'.repeat(32), mode: momMode, graceSeconds: 600 }) });
         });
         if (autoEnd && ['end', 'finish'].includes(control.type)) queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'meeting_segment_ended', ack: control.lastSequence, minutesFinalizing: control.type === 'finish' }) }));
@@ -63,8 +65,13 @@ function harness({ failInitialName, failReplacementName, permissionState = 'prom
     createAnalyser() { return node(); }
   }
   const source = fs.readFileSync(new URL('../entrypoints/offscreen.ts', import.meta.url), 'utf8');
+  class Pcm {
+    static async start(context, stream, sink, onError) { const value=new Pcm();value.sink=sink;value.onError=onError;pcmCaptures.push(value);return value; }
+    emit(size=6400) { this.sink({size}); }
+    finish(sink) { this.sink=sink;this.emit(100);return deferPcmFinish ? new Promise(resolve=>{this.resolve=resolve;}) : Promise.resolve(); }
+  }
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
-    exports: {}, require(name) { if (name.includes('user-messages')) return userMessages; return name.includes('config') ? { AUDIO_MIME_TYPE: 'audio/webm', AUDIO_WINDOW_MS: 3000, MEETING_SOCKET_URL: 'ws://localhost' } : { isTimelineSnapshot: message => message.type === 'timeline_snapshot' }; },
+    exports: {}, require(name) { if (name.includes('user-messages')) return userMessages; if(name.includes('pcm-capture'))return {PcmCapture:Pcm}; return name.includes('config') ? { STREAMING_TRANSCRIPTION:streaming, AUDIO_MIME_TYPE: 'audio/webm', AUDIO_WINDOW_MS: 3000, MEETING_SOCKET_URL: 'ws://localhost' } : { isTimelineSnapshot: message => message.type === 'timeline_snapshot' }; },
     defineUnlistedScript: callback => callback(), queueMicrotask, Date: Clock, DOMException, Error, MediaRecorder: Recorder, WebSocket: Socket, AudioContext: Context,
     navigator: { mediaDevices: { async getUserMedia(options) {
       if (options.audio.mandatory) { const selected = ++tabRequests === 1 ? tab : stream(); acquiredTabs.push(selected); return selected; }
@@ -80,7 +87,7 @@ function harness({ failInitialName, failReplacementName, permissionState = 'prom
     setTimeout(callback, delay) { timeouts.set(++timer, { callback, delay }); return timer; }, clearTimeout(id) { timeouts.delete(id); },
     setInterval(callback, delay) { intervals.set(++timer, { callback, delay }); return timer; }, clearInterval(id) { intervals.delete(id); },
   });
-  return { messages, sockets, recorders, contexts, microphone, replacement, intervals, acquiredMicrophones, acquiredTabs,
+  return { messages, sockets, recorders, contexts, microphone, replacement, intervals, acquiredMicrophones, acquiredTabs, pcmCaptures,
     get micRequests() { return micRequests; },
     resolveReplacement: () => resolveReplacement(replacement),
     resolveFirstClose: () => resolveFirstClose(),
@@ -551,4 +558,47 @@ test('live-only stop never sends a MOM finalization or persists minutes metadata
   await h.send({ type: 'STOP_OFFSCREEN', finishMinutes: true });
   assert.equal(h.sockets[0].controls.some(m => ['end', 'finish'].includes(m.type)), false);
   assert.equal(h.messages.some(m => m.type === 'MOM_UPDATE'), false);
+});
+
+test('streaming capture keeps one encoder and socket for continuous PCM and drains on stop', async()=>{
+  const h=harness({streaming:true});
+  await h.send({type:'START_OFFSCREEN',streamId:'tab',captureSessionId:'streaming-session'});
+  assert.equal(h.recorders.length,0);
+  assert.equal(h.pcmCaptures.length,1);
+  assert.equal(h.sockets[0].controls[0].audioFormat,'pcm_s16le_16000');
+  for(let n=0;n<100;n++)h.pcmCaptures[0].emit();
+  assert.equal(h.sockets.length,1);
+  assert.equal(h.sockets[0].sent.length,100);
+  const result=await h.send({type:'STOP_OFFSCREEN'});
+  assert.equal(result.ok,true);
+  assert.equal(h.sockets[0].sent.length,101,'flush final sub-frame');
+  assert.ok(h.sockets[0].controls.some(c=>c.type==='end'&&c.lastSequence===101));
+  assert.equal(h.microphone.getTracks()[0].readyState,'ended');
+  assert.equal(h.intervals.size,0);
+});
+
+test('streaming stops hardware immediately while final PCM is being flushed',async()=>{
+  const h=harness({streaming:true,deferPcmFinish:true});
+  await h.send({type:'START_OFFSCREEN',streamId:'tab',captureSessionId:'streaming-session'});
+  const stopping=h.send({type:'STOP_OFFSCREEN'});
+  assert.equal(h.microphone.getTracks()[0].readyState,'ended');
+  assert.equal(h.tab.getTracks()[0].readyState,'ended');
+  h.pcmCaptures[0].emit(80);
+  h.pcmCaptures[0].resolve();
+  await stopping;
+  assert.equal(h.sockets[0].sent.length,2);
+  assert.equal(h.contexts[0].state,'closed');
+});
+
+test('streaming connection loss releases the mic and never silently replays uncertain audio',async()=>{
+  const h=harness({streaming:true});
+  await h.send({type:'START_OFFSCREEN',streamId:'tab',captureSessionId:'streaming-session'});
+  h.sockets[0].readyState=3;
+  h.sockets[0].onclose({code:1006});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(h.microphone.getTracks()[0].readyState,'ended');
+  assert.equal(h.tab.getTracks()[0].readyState,'ended');
+  assert.equal(h.sockets.length,1);
+  assert.ok(h.messages.some(m=>m.state?.error?.includes('MI-STT-001')));
+  assert.equal(h.intervals.size,0);
 });

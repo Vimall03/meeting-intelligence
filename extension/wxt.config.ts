@@ -11,7 +11,7 @@ export default defineConfig({
     return {
       name: 'Meeting Intelligence',
       description: 'Meeting help and optional recaps for Google Meet, with Zoom browser capture in preview.',
-      version: '0.1.12',
+      version: '0.1.13',
       // Public store key keeps unpacked test builds on the published extension ID.
       key: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAosv16yqEH27nxiUDK91Pksq2VKquEntod1mLF3TiM/R/x8X6eDGr2ajv1wojxz9eE8m16fpRoDKaHRbC5FlfDxbDDiyqzFU1YoR3w17/TMPftZeJ68HcTcA0H2monsrUow9MXCUHq/o7swM3C/372f3EMsMt71PFLj8RPG2dkeuXaWP/CoqVnS8c75C5si+DvnL/XDS0DGNIApwhwiDAB8zMsyhlFx71Dp8gF8mhWepW7rK4mEUfKYSInapTT+QLtOFCCdYFHWRsYmxgFiLP6yZsiMwRR0iLs7yzlZU3FPASFP0wcibwI/taL9qYyVT3ygyn4hjMjWyJqM6CqazkUQIDAQAB',
       permissions: ['activeTab', 'tabCapture', 'offscreen', 'storage', 'sidePanel', 'scripting'],

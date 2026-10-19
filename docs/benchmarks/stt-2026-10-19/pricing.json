@@ -1,0 +1,38 @@
+{
+  "checked_at": "2026-10-19T05:32:19.414206+00:00",
+  "aws": {
+    "source": "AWS Price List API get_products, ServiceCode=transcribe, location=Asia Pacific (Mumbai)",
+    "region": "ap-south-1",
+    "sku": "GMX2RE7GZJ5RKAYN",
+    "operation": "TranscribeAudio",
+    "dimensions": [
+      {
+        "unit": "second",
+        "endRange": "Inf",
+        "description": "$0.0001 per second for TranscribeAudio in Asia Pacific (Mumbai)",
+        "appliesTo": [],
+        "rateCode": "GMX2RE7GZJ5RKAYN.JRTCKXETXF.6YS6EN2CT7",
+        "beginRange": "0",
+        "pricePerUnit": {
+          "USD": "0.0001000000"
+        }
+      }
+    ],
+    "billing": "1-second increments; minimum 15 seconds per streaming request",
+    "cost_basis": "list-price estimate, not a finalized AWS invoice"
+  },
+  "openrouter": {
+    "source": "https://openrouter.ai/openai/gpt-transcribe",
+    "model": "openai/gpt-transcribe",
+    "listed_usd_per_audio_second": 7.5e-05,
+    "cost_basis": "provider-reported usage.cost on successful requests; published-rate estimate on the three short-tail failures"
+  },
+  "exclusions": [
+    "taxes",
+    "credits/free tier",
+    "EC2 and network",
+    "S3/DynamoDB/KMS operations",
+    "downstream intent/search/LLM calls",
+    "exploratory smoke tests and aborted first benchmark attempt"
+  ]
+}

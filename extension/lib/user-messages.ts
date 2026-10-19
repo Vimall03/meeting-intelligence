@@ -32,6 +32,7 @@ export const userMessages = {
   'MI-CON-004': 'Reconnecting to your meeting. Listening continues while we restore the connection.',
   'MI-CON-005': 'The connection has been unavailable for too long. Start listening again when your connection returns.',
   'MI-CON-007': 'We couldn’t restore this meeting’s saved progress. Start listening again to begin a new session.',
+  'MI-STT-001': 'Listening was interrupted. Start listening again. Your last few words may be missing.',
   'MI-MIC-001': 'Microphone access is blocked. Choose Enable microphone and allow access in your browser.',
   'MI-MIC-002': 'We couldn’t open your microphone. Check your input device and microphone access in your browser and system settings.',
   'MI-MIC-003': 'No microphone was found. Connect one and try again.',

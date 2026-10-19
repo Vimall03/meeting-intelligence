@@ -1,0 +1,241 @@
+{
+  "provenance": {
+    "synthetic": "Locally generated macOS voices; no private meeting content.",
+    "human": "LibriSpeech test-clean, CC BY 4.0, https://www.openslr.org/12/",
+    "limitations": "Synthetic meeting scripts + human read speech; no real conversational overlap or live meeting capture."
+  },
+  "clips": [
+    {
+      "id": "plain-us",
+      "category": "synthetic_clean",
+      "utterances": [
+        {
+          "text": "Please send the revised launch plan to Maya before Friday afternoon.",
+          "start": 0.5011875,
+          "end": 4.131562499999999
+        },
+        {
+          "text": "The design is approved, but the payment tests still need an owner.",
+          "start": 5.1415625,
+          "end": 8.5103125
+        },
+        {
+          "text": "We will review the results together at the next meeting.",
+          "start": 9.5204375,
+          "end": 12.141437499999999
+        }
+      ],
+      "voices": "Samantha (English (US))",
+      "noise_snr_db": null,
+      "audio": "plain-us.wav",
+      "sha256": "46d102586654c89cb8bf0160575fb9afce83287ba29a495d815794cef54db0a5",
+      "duration_s": 14.1410625
+    },
+    {
+      "id": "technical-uk",
+      "category": "synthetic_clean",
+      "utterances": [
+        {
+          "text": "The authentication callback fails when the session token expires.",
+          "start": 0.5039375,
+          "end": 4.3721875
+        },
+        {
+          "text": "Add exponential backoff and an idempotency key before retrying the request.",
+          "start": 5.375437499999999,
+          "end": 9.705375
+        },
+        {
+          "text": "Keep the release blocked until the integration tests pass.",
+          "start": 10.7116875,
+          "end": 14.006812499999999
+        }
+      ],
+      "voices": "Daniel",
+      "noise_snr_db": null,
+      "audio": "technical-uk.wav",
+      "sha256": "4b0f4efcc45c617ed009a44804b78153e9ef2981fa43ef483115de83f71fa969",
+      "duration_s": 16.012125
+    },
+    {
+      "id": "numbers-india",
+      "category": "synthetic_clean",
+      "utterances": [
+        {
+          "text": "The budget is fourteen thousand dollars, not forty thousand dollars.",
+          "start": 0.5008125,
+          "end": 4.540125
+        },
+        {
+          "text": "We need seventeen licenses for the engineering team by November twenty first.",
+          "start": 5.561625,
+          "end": 10.189499999999999
+        },
+        {
+          "text": "Move the deadline from Tuesday to Thursday and keep the same owner.",
+          "start": 11.2025625,
+          "end": 15.0784375
+        }
+      ],
+      "voices": "Rishi",
+      "noise_snr_db": null,
+      "audio": "numbers-india.wav",
+      "sha256": "51ef3196d5390a52315feeb8cd009bdd9252ffe4c382c51c9070b9705f007d92",
+      "duration_s": 17.0954375
+    },
+    {
+      "id": "corrections-australia",
+      "category": "synthetic_clean",
+      "utterances": [
+        {
+          "text": "Do not create another task for the checkout issue because it already exists.",
+          "start": 0.506875,
+          "end": 4.7495
+        },
+        {
+          "text": "I said the client approved the design, not the deployment.",
+          "start": 5.7244375000000005,
+          "end": 9.055
+        },
+        {
+          "text": "Actually, hold the release until Priya confirms that the database migration is safe.",
+          "start": 10.035375,
+          "end": 15.081624999999999
+        }
+      ],
+      "voices": "Karen",
+      "noise_snr_db": null,
+      "audio": "corrections-australia.wav",
+      "sha256": "d6a88bda1c1f0c92fed055a5358f84b2474f24aa50e5a25caadb45ae49e1762a",
+      "duration_s": 17.057125
+    },
+    {
+      "id": "technical-noise",
+      "category": "synthetic_noisy",
+      "utterances": [
+        {
+          "text": "The authentication callback fails when the session token expires.",
+          "start": 0.5039375,
+          "end": 4.3721875
+        },
+        {
+          "text": "Add exponential backoff and an idempotency key before retrying the request.",
+          "start": 5.375437499999999,
+          "end": 9.779187499999999
+        },
+        {
+          "text": "Keep the release blocked until the integration tests pass.",
+          "start": 10.781375,
+          "end": 14.1208125
+        }
+      ],
+      "voices": "Daniel",
+      "noise_snr_db": 12,
+      "audio": "technical-noise.wav",
+      "sha256": "8e00f01bea5476d31f5345ba640fff34f8e4216de13e739833962e34ccb213e7",
+      "duration_s": 16.12825
+    },
+    {
+      "id": "alternating-voices",
+      "category": "synthetic_clean",
+      "utterances": [
+        {
+          "text": "Can we ship the updated dashboard on Friday?",
+          "start": 0.500625,
+          "end": 3.248375
+        },
+        {
+          "text": "Only if the accessibility review is complete and the search issue is fixed.",
+          "start": 4.258624999999999,
+          "end": 8.3621875
+        },
+        {
+          "text": "Then let us keep Monday as the delivery date and tell the client today.",
+          "start": 9.379312500000001,
+          "end": 13.095062500000001
+        }
+      ],
+      "voices": [
+        "Rishi",
+        "Daniel",
+        "Karen"
+      ],
+      "noise_snr_db": null,
+      "audio": "alternating-voices.wav",
+      "sha256": "29c38e702eb78d5f3c462ca5597b7e58ef80710f2a6301be83d93e6c8b73f622",
+      "duration_s": 15.090375
+    },
+    {
+      "id": "librispeech-6930-75918-0000",
+      "category": "human_read_speech",
+      "utterances": [
+        {
+          "text": "CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS",
+          "start": 0.003,
+          "end": 3.505
+        }
+      ],
+      "source_id": "6930-75918-0000",
+      "speaker_id": 6930,
+      "license": "CC BY 4.0",
+      "source": "https://www.openslr.org/12/",
+      "audio": "librispeech-6930-75918-0000.wav",
+      "sha256": "f5ad2e4643741fabebdfc566efde7b91fc1454948fb1d4dc1661a9ca7e4ee560",
+      "duration_s": 4.505
+    },
+    {
+      "id": "librispeech-6930-76324-0019",
+      "category": "human_read_speech",
+      "utterances": [
+        {
+          "text": "NOW LET'S DUST THE FURNITURE AND PICTURES",
+          "start": 0.0001875,
+          "end": 2.575
+        }
+      ],
+      "source_id": "6930-76324-0019",
+      "speaker_id": 6930,
+      "license": "CC BY 4.0",
+      "source": "https://www.openslr.org/12/",
+      "audio": "librispeech-6930-76324-0019.wav",
+      "sha256": "235b41746f25692704cc4d38ac0c987ab228e2ebcb156ece0cb9c45feb726a0e",
+      "duration_s": 3.575
+    },
+    {
+      "id": "librispeech-1320-122612-0000",
+      "category": "human_read_speech",
+      "utterances": [
+        {
+          "text": "SINCE THE PERIOD OF OUR TALE THE ACTIVE SPIRIT OF THE COUNTRY HAS SURROUNDED IT WITH A BELT OF RICH AND THRIVING SETTLEMENTS THOUGH NONE BUT THE HUNTER OR THE SAVAGE IS EVER KNOWN EVEN NOW TO PENETRATE ITS WILD RECESSES",
+          "start": 0.00525,
+          "end": 13.478875
+        }
+      ],
+      "source_id": "1320-122612-0000",
+      "speaker_id": 1320,
+      "license": "CC BY 4.0",
+      "source": "https://www.openslr.org/12/",
+      "audio": "librispeech-1320-122612-0000.wav",
+      "sha256": "64fa88d44535c3ef44c58bbd61c339a38aec327293cac3d3d74e4d9b09f13e2f",
+      "duration_s": 14.48
+    },
+    {
+      "id": "librispeech-7729-102255-0039",
+      "category": "human_read_speech",
+      "utterances": [
+        {
+          "text": "THE INMATES BEING REMOVED AT THE APPOINTED HOUR A FEW CANNON BALLS WERE FIRED THROUGH THE STONE WALLS",
+          "start": 0.4429375,
+          "end": 6.53
+        }
+      ],
+      "source_id": "7729-102255-0039",
+      "speaker_id": 7729,
+      "license": "CC BY 4.0",
+      "source": "https://www.openslr.org/12/",
+      "audio": "librispeech-7729-102255-0039.wav",
+      "sha256": "d8ebc4b7bb9175edf683224e1f07e082848bc2155e020fd997f3111dffd536fc",
+      "duration_s": 7.815
+    }
+  ]
+}

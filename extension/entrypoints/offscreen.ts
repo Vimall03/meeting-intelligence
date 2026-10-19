@@ -1,9 +1,11 @@
 import { problem, userError, microphoneProblem } from '../lib/user-messages';
-import { AUDIO_MIME_TYPE, AUDIO_WINDOW_MS, MEETING_SOCKET_URL } from '../lib/config';
+import { AUDIO_MIME_TYPE, AUDIO_WINDOW_MS, MEETING_SOCKET_URL, STREAMING_TRANSCRIPTION } from '../lib/config';
+import { PcmCapture } from '../lib/pcm-capture';
 import type { MomMode, MomMeeting } from '../lib/mom';
 import { isTimelineSnapshot } from '../lib/timeline';
 
 let recorder: MediaRecorder | undefined;
+let pcmCapture: PcmCapture | undefined;
 let tabStream: MediaStream | undefined;
 let microphoneStream: MediaStream | undefined;
 let recordingStream: MediaStream | undefined;
@@ -56,6 +58,13 @@ function flushAudio() {
 
 function retryConnection(failedSocket: WebSocket | undefined, generation: number) {
   if (generation !== captureGeneration || stopping || (failedSocket && socket !== failedSocket)) return;
+  // Canary transport deliberately fails closed: partial provider state cannot be
+  // safely replayed through the legacy window checkpoint protocol.
+  if (STREAMING_TRANSCRIPTION) {
+    notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-STT-001') });
+    void stop();
+    return;
+  }
   if (authTimer) clearTimeout(authTimer);
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   authTimer = heartbeatTimer = undefined;
@@ -93,7 +102,8 @@ async function connectSocket(generation: number) {
   authTimer = setTimeout(handshakeTimeout, 10_000);
   sessionSocket.onopen = () => {
     if (socket !== sessionSocket || stopping) return;
-    sessionSocket.send(JSON.stringify({ type: 'authenticate', ticket: authorization.ticket, meetingId: captureSessionId, roomId, momSessionId: minutesSession?.sessionId, lastAck: acknowledgedSequence }));
+    sessionSocket.send(JSON.stringify({ type: 'authenticate', ticket: authorization.ticket, meetingId: captureSessionId, roomId, momSessionId: minutesSession?.sessionId, lastAck: acknowledgedSequence,
+      ...(STREAMING_TRANSCRIPTION ? { audioFormat: 'pcm_s16le_16000' } : {}) }));
   };
   sessionSocket.onerror = () => retryConnection(sessionSocket, generation);
   sessionSocket.onclose = event => {
@@ -109,6 +119,10 @@ async function connectSocket(generation: number) {
       const message = JSON.parse(event.data);
       lastServerMessageAt = Date.now();
       if (message.type === 'auth_ready' && typeof message.expiresAt === 'number') {
+        if (STREAMING_TRANSCRIPTION && message.audioFormat !== 'pcm_s16le_16000') {
+          retryConnection(sessionSocket, generation);
+          return;
+        }
         const firstAuthorization = !socketAuthorized;
         socketAuthorized = true;
         authorizedUntil = typeof message.expiresIn === 'number' ? Date.now() + message.expiresIn * 1000 : message.expiresAt * 1000;
@@ -262,14 +276,14 @@ async function start(streamId: string, sessionId: string, room?: string, userId?
     throw error;
   }
 
-  if (!MediaRecorder.isTypeSupported(AUDIO_MIME_TYPE)) {
+  if (!STREAMING_TRANSCRIPTION && !MediaRecorder.isTypeSupported(AUDIO_MIME_TYPE)) {
     throw new Error(problem('MI-CAP-008'));
   }
 
   notify({ captureStatus: 'connecting', backendConnected: false, timeline: undefined, error: undefined });
   await connectSocket(generation);
 
-  audioContext = new AudioContext();
+  audioContext = new AudioContext(STREAMING_TRANSCRIPTION ? { sampleRate: 16000 } : undefined);
   await audioContext.resume();
   assertCurrent(generation);
   const mix = audioContext.createMediaStreamDestination();
@@ -435,17 +449,33 @@ async function start(streamId: string, sessionId: string, room?: string, userId?
       : undefined });
   }, 3000);
 
-  const activeRecorder = new MediaRecorder(recordingStream, { mimeType: AUDIO_MIME_TYPE });
-  recorder = activeRecorder;
-  activeRecorder.ondataavailable = (event) => {
-    if (recorder !== activeRecorder || stopping || !event.data.size) return;
-    audioQueue.push({ sequence: ++audioSequence, data: event.data });
-    if (event.data.size > 2_000_000 || audioQueue.length > 20 || audioQueue.reduce((size, window) => size + window.data.size, 0) > 12_000_000) {
+  const enqueue = (data: Blob) => {
+    if (generation !== captureGeneration || stopping || !data.size) return;
+    audioQueue.push({ sequence: ++audioSequence, data });
+    if (data.size > 2_000_000 || audioQueue.length > (STREAMING_TRANSCRIPTION ? 50 : 20) || audioQueue.reduce((size, window) => size + window.data.size, 0) > 12_000_000) {
       notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-CON-005') });
       void stop();
       return;
     }
     flushAudio();
+  };
+  if (STREAMING_TRANSCRIPTION) {
+    const capture = await PcmCapture.start(sessionContext, recordingStream, enqueue, () => {
+      if (generation !== captureGeneration || stopping) return;
+      notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-STT-001') });
+      void stop();
+    });
+    if (generation !== captureGeneration || stopping) {
+      await capture.finish(() => {});
+      throw new DOMException(problem('MI-CAP-006'), 'AbortError');
+    }
+    pcmCapture = capture;
+    return;
+  }
+  const activeRecorder = new MediaRecorder(recordingStream, { mimeType: AUDIO_MIME_TYPE });
+  recorder = activeRecorder;
+  activeRecorder.ondataavailable = (event) => {
+    if (recorder === activeRecorder) enqueue(event.data);
   };
   activeRecorder.onstop = () => {
     if (recorder !== activeRecorder || stopping) return;
@@ -537,8 +567,15 @@ async function stop(finishMinutes = false): Promise<{ warning?: string }> {
   const needsMinutes = captureMode !== 'live_only' || !!retiringMinutes;
   const wasAuthorized = socketAuthorized;
   const pendingAudio = audioQueue.slice();
-  const finalSequence = audioSequence;
+  let finalSequence = audioSequence;
   const lastSent = sentThrough;
+  const activePcm = pcmCapture;
+  pcmCapture = undefined;
+  const pcmFinished = activePcm?.finish(data => {
+    if (data.size) pendingAudio.push({ sequence: ++finalSequence, data });
+  });
+  // Attach a rejection handler immediately; hardware cleanup happens before awaiting it.
+  void pcmFinished?.catch(() => undefined);
   minutesSession = undefined;
   captureMode = 'live_only';
   captureGeneration += 1;
@@ -577,9 +614,14 @@ async function stop(finishMinutes = false): Promise<{ warning?: string }> {
   tabGain = microphoneGain = undefined;
   retryMicrophoneCapture = undefined;
 
-  const drained = needsMinutes && retiringMinutes
-    ? drainMinutes(activeSocket, activeRecorder, pendingAudio, finalSequence, lastSent, wasAuthorized, finishMinutes)
-    : undefined;
+  const drained = activePcm
+    ? (async () => {
+      try { await pcmFinished; } catch { return false; }
+      return drainMinutes(activeSocket, undefined, pendingAudio, finalSequence, lastSent, wasAuthorized, finishMinutes);
+    })()
+    : needsMinutes && retiringMinutes
+      ? drainMinutes(activeSocket, activeRecorder, pendingAudio, finalSequence, lastSent, wasAuthorized, finishMinutes)
+      : undefined;
 
   // Release the selected tab and mic before waiting for MediaRecorder to stop.
   activeRecordingStream?.getTracks().forEach((track) => track.stop());
@@ -611,6 +653,8 @@ async function stop(finishMinutes = false): Promise<{ warning?: string }> {
     await recorderStopped;
   }
   // Close the mixer independently of network processing; hardware is already off.
+  // Flush the worklet's final sub-frame while the mixer can still render.
+  if (pcmFinished) await pcmFinished.catch(() => undefined);
   try { await activeAudioContext?.close(); } catch { /* Context may already be closed. */ }
   const complete = drained ? await drained : !needsMinutes;
   activeSocket?.close();

@@ -34,3 +34,11 @@ Use `lib/user-messages.ts` and `userError` for every error display, with stable 
 ## Release verification
 
 Automated checks cover room detection, waiting-room rejection, platform isolation, capture/rejoin behavior, microphone cleanup, sign-in, timeline contracts, and recap state. A live two-person Zoom call with remote audio, microphone audio, reconnect, and recap verification is still required before promoting Zoom support out of preview. The release remains labelled as a Zoom browser preview in the Web Store submission.
+
+## Streaming canary (0.1.13 development branch)
+
+The public 0.1.12 submission remains unchanged. The default build retains the existing capture and recovery method. To test continuous transcription, build with `WXT_STREAMING_TRANSCRIPTION=true` and enable `STREAMING_STT_ENABLED=true` on an isolated service with Amazon Transcribe streaming access. The browser mixes the same tab and microphone sources into mono 16 kHz PCM, sent in 200 ms frames over one authenticated connection. No provider credentials reach the browser.
+
+Only final transcript results enter live assistance and recaps. Stop listening releases the microphone immediately and flushes the remaining frame before finalizing. This canary deliberately stops with a support code on connection loss; it does not support transparent replay/reconnect. Resume is rejected to prevent gaps or duplicated meeting content. Keep it out of the public release until durable recovery, noisy-call finalization and a real meeting check pass.
+
+The measured comparison, costs, limitations and reproduction steps are in [the benchmark report](../docs/benchmarks/stt-2026-10-19/REPORT.md).

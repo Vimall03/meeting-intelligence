@@ -86,10 +86,13 @@ class OpenRouterTranscriptionService:
                 }
             )
 
+        usage = result.get('usage')
+        cost = usage.get('cost') if isinstance(usage, dict) else None
         return {
             "segments": segments, "audio_duration": audio_duration,
             "audio_rms": float(np.sqrt(np.mean(np.square(audio)))),
             "audio_peak": float(np.max(np.abs(audio))),
+            **({'usage_cost_usd': cost} if type(cost) in (int, float) and cost >= 0 else {}),
         }
 
     @staticmethod
