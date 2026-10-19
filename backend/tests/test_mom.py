@@ -14,6 +14,7 @@ from fastapi import FastAPI
 
 from app.mom.repository import Repository, Conflict, MomError
 from app.mom.worker import Processor, sweep_repository, transcript, verified_email
+from app.mom import worker as mom_worker
 from app.mom.processing import generate_minutes
 from app.api.routes import mom
 from app.core.auth import Principal
@@ -88,6 +89,34 @@ class Ses:
         self.calls.append(args)
         if self.error: raise self.error
         return {'MessageId': 'receipt'}
+
+
+class RecoveryConnectionTests(unittest.TestCase):
+    def test_warm_sweeps_reuse_connection_pool_without_caching_work(self):
+        environment = {'MOM_TABLE_NAME': 'mom', 'MOM_BUCKET_NAME': 'private',
+            'MOM_KEY_ARN': 'key', 'MOM_QUEUE_URL': 'queue', 'AUTH_TABLE_NAME': 'recovery',
+            'AWS_REGION': 'ap-south-1'}
+        requests = []
+
+        class EmptyDynamo:
+            def query(self, **kwargs):
+                requests.append(kwargs)
+                return {'Items': []}
+
+        client = EmptyDynamo()
+        mom_worker.repository.cache_clear()
+        try:
+            with patch.dict('os.environ', environment), patch('app.mom.repository.boto3.client', return_value=client) as factory:
+                mom_worker.repository().clock = lambda: 1234567890
+                self.assertEqual(mom_worker.sweep({}, None), {'ok': True})
+                self.assertEqual(mom_worker.sweep({}, None), {'ok': True})
+                factory.assert_called_once()
+                self.assertEqual(factory.call_args.args, ('dynamodb',))
+                # Both invocations still query every workflow state for due work.
+                self.assertEqual(len(requests), 14)
+                self.assertEqual(requests[:7], requests[7:])
+        finally:
+            mom_worker.repository.cache_clear()
 
 
 class MomTests(unittest.TestCase):

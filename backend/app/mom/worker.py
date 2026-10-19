@@ -11,6 +11,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 import boto3
@@ -33,7 +34,11 @@ def failure_metric(code):
         'Metrics': [{'Name': 'Failures', 'Unit': 'Count'}]}]}, 'Failures': 1, 'supportCode': code}))
 
 
+@lru_cache(maxsize=1)
 def repository():
+    # Retain SDK connection pools across warm Lambda invocations. Recreating
+    # them every minute forces DynamoDB to rebuild its KMS table-key cache.
+    # Repository holds configuration and clients only, never meeting content.
     required = ['MOM_TABLE_NAME', 'MOM_BUCKET_NAME', 'MOM_KEY_ARN', 'MOM_QUEUE_URL', 'AUTH_TABLE_NAME']
     if any(not os.environ.get(name) for name in required): raise MomError()
     return Repository(table=os.environ['MOM_TABLE_NAME'], bucket=os.environ['MOM_BUCKET_NAME'],
