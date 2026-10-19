@@ -4,7 +4,7 @@ import time
 import socket
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 from fastapi import WebSocketDisconnect
 from app.core.auth import Principal, issue_ticket
@@ -122,6 +122,42 @@ class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(2):
             with self.assertRaises(MeetingBusy):
                 await checkpoints.save(self.state)
+
+    async def test_idle_renewals_preserve_cipher_and_recovery_without_more_encryption(self):
+        tick = [0]
+        wall = int(time.time())
+        principal = Principal('A', 'family-A', wall + 7200)
+        session = MeetingSessions(self.db, principal, 'idle-hour')
+        encrypt = AsyncMock(wraps=self.db.encrypt)
+        with patch.object(self.db, 'encrypt', encrypt), patch('app.services.meeting_sessions.time.time', side_effect=lambda: wall + tick[0]):
+            await session.acquire()
+            checkpoints = MeetingCheckpoints(session, clock=lambda: tick[0])
+            await checkpoints.save(self.state)
+            cipher = self.db.rows[session.key]['cipher']
+            for second in range(5, 3601, 5):
+                tick[0] = second
+                await checkpoints.save(self.state)
+                self.assertEqual(self.db.rows[session.key]['cipher'], cipher)
+                self.assertEqual(self.db.rows[session.key]['leaseUntil'], wall + second + 20)
+            self.assertEqual(encrypt.await_count, 1)
+            await session.release()
+            resumed = MeetingSessions(self.db, principal, 'idle-hour')
+            self.assertEqual(await resumed.acquire(), self.state)
+
+    async def test_renewal_retains_revocation_and_failed_writes_are_retried(self):
+        session = MeetingSessions(self.db, self.a, 'renewal-failure')
+        await session.acquire()
+        checkpoints = MeetingCheckpoints(session, clock=lambda: 10)
+        await checkpoints.save(self.state)
+        checkpoints.clock = lambda: 15
+        with patch.object(self.db, 'put', side_effect=RuntimeError('storage unavailable')):
+            with self.assertRaises(RuntimeError): await checkpoints.save(self.state)
+        self.assertEqual(checkpoints.saved_at, 10)
+        await checkpoints.save(self.state)
+        await self.db.put('REVOKED#' + self.a.family, {'expiresAt': self.a.expires})
+        checkpoints.clock = lambda: 20
+        from app.services.user_store import StoreConflict
+        with self.assertRaises(StoreConflict): await checkpoints.save(self.state)
 
     async def test_work_completion_wakes_socket_without_waiting_for_audio_or_poll_timeout(self):
         self.db.test_drive = FakeDrive()

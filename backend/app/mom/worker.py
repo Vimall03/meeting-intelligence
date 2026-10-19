@@ -215,5 +215,8 @@ def handler(event, context):
 
 
 def sweep(event, context):
-    sweep_repository(repository())
+    repo = repository()
+    if os.environ.get('MOM_RECOVERY_IDLE_GATE', '').lower() == 'true' and repo.recovery_idle():
+        return {'ok': True}
+    sweep_repository(repo)
     return {'ok': True}

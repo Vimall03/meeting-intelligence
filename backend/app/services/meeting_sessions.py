@@ -39,8 +39,12 @@ class MeetingCheckpoints:
 
     async def save(self, state):
         digest = self.digest(state)
-        if digest == self.saved_digest and self.clock() - self.saved_at < 5:
-            return False
+        if digest == self.saved_digest:
+            if self.clock() - self.saved_at < 5:
+                return False
+            await self.session.renew()
+            self.saved_at = self.clock()
+            return True
         await self.session.save(state)
         # save may trim an oversized timeline; compare the persisted state.
         self.saved_digest, self.saved_at = self.digest(state), self.clock()
@@ -78,11 +82,27 @@ class MeetingSessions:
         self.version = record['version']
         return await self.db.decrypt(self.principal.sub, 'meeting-state', row['cipher']) if row and row.get('cipher') else {}
 
-    async def save(self, state):
+    async def _owned_row(self):
         row = await self.db.get(self.key)
         now = int(time.time())
         if not row or row.get('owner') != self.owner or row['version'] != self.version or row['leaseUntil'] <= now:
             raise MeetingBusy()
+        return row, now
+
+    async def _persist(self, row, now):
+        await self.db.put(self.key, {**row, 'version': self.version + 1,
+            'leaseUntil': now + self.LEASE_SECONDS, 'expiresAt': now + self.RETENTION_SECONDS},
+            version=self.version, family=self.principal.family)
+        self.version += 1
+
+    async def renew(self):
+        # Retain the durable ciphertext while fencing the owner and revocation
+        # exactly as a content save does. No data-key generation is needed.
+        row, now = await self._owned_row()
+        await self._persist(row, now)
+
+    async def save(self, state):
+        row, now = await self._owned_row()
         # Keep each encrypted item well below DynamoDB's 400 KB item limit.
         # Timeline revisions/IDs stay monotonic when old cards are trimmed.
         while len(json.dumps(state).encode()) > 180_000 and state['timeline']['items']:
@@ -90,10 +110,7 @@ class MeetingSessions:
         if len(json.dumps(state).encode()) > 180_000:
             raise ValueError('Meeting checkpoint too large')
         cipher = await self.db.encrypt(self.principal.sub, 'meeting-state', state)
-        await self.db.put(self.key, {**row, 'cipher': cipher, 'version': self.version + 1,
-            'leaseUntil': now + self.LEASE_SECONDS, 'expiresAt': now + self.RETENTION_SECONDS},
-            version=self.version, family=self.principal.family)
-        self.version += 1
+        await self._persist({**row, 'cipher': cipher}, now)
 
     async def release(self):
         row = await self.db.get(self.key)

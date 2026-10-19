@@ -164,6 +164,10 @@ async def _meeting_stream(websocket: WebSocket):
     checkpoint_total_ms = 0.0
     checkpoint_max_ms = 0.0
     class MinutesCheckpointSession:
+        async def renew(self):
+            await asyncio.to_thread(mom_repo.touch, mom_attachment)
+            await session.renew()
+
         async def save(self, state):
             await asyncio.to_thread(mom_repo.save_checkpoint, mom_attachment, session.session_id, state)
             # The existing table has PITR. Do not place new MOM content in its backups.

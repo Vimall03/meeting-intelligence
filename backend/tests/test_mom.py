@@ -12,7 +12,7 @@ import httpx
 from botocore.exceptions import ClientError
 from fastapi import FastAPI
 
-from app.mom.repository import Repository, Conflict, MomError
+from app.mom.repository import Repository, Conflict, MomError, RECOVERY_ACTIVITY_KEY
 from app.mom.worker import Processor, sweep_repository, transcript, verified_email
 from app.mom import worker as mom_worker
 from app.mom.processing import generate_minutes
@@ -64,10 +64,15 @@ class MemoryRepository(Repository):
             clock=lambda: self.now[0], clients={'s3': self.s3, 'sqs': self.queue_client, 'dynamodb': self.dynamo})
         self.rows = {}; self.lock = threading.Lock()
     def get(self, key): return copy.deepcopy(self.rows.get(key))
-    def put(self, row, *, version=None):
+    def put(self, row, *, version=None, activity_delta=0):
         with self.lock:
             current = self.rows.get(row['pk'])
             if version is None and current or version is not None and (not current or current['version'] != version): raise Conflict()
+            if activity_delta:
+                count = self.rows.get(RECOVERY_ACTIVITY_KEY, {}).get('activeCount', 0)
+                if count + activity_delta < 0: raise Conflict()
+                self.rows[RECOVERY_ACTIVITY_KEY] = {**self.rows.get(RECOVERY_ACTIVITY_KEY, {}),
+                    'pk': RECOVERY_ACTIVITY_KEY, 'activeCount': count + activity_delta}
             self.rows[row['pk']] = copy.deepcopy(row)
             return copy.deepcopy(row)
     def create_room(self, pointer, row, prior):
@@ -75,6 +80,8 @@ class MemoryRepository(Repository):
             current = self.rows.get(pointer['pk'])
             if prior and (not current or current['version'] != prior['version']) or not prior and current: raise Conflict()
             self.rows[pointer['pk']] = copy.deepcopy(pointer); self.rows[row['pk']] = copy.deepcopy(row)
+            self.rows[RECOVERY_ACTIVITY_KEY] = {**self.rows.get(RECOVERY_ACTIVITY_KEY, {}),
+                'pk': RECOVERY_ACTIVITY_KEY, 'activeCount': self.rows.get(RECOVERY_ACTIVITY_KEY, {}).get('activeCount', 0) + 1}
     def unlink_room(self, row):
         key=f"ROOM#{row['userId']}#{row.get('roomId')}"
         with self.lock:
@@ -92,6 +99,36 @@ class Ses:
 
 
 class RecoveryConnectionTests(unittest.TestCase):
+    def test_idle_sweep_performs_one_consistent_read_and_no_job_queries(self):
+        environment = {'MOM_TABLE_NAME': 'mom', 'MOM_BUCKET_NAME': 'private',
+            'MOM_KEY_ARN': 'key', 'MOM_QUEUE_URL': 'queue', 'AUTH_TABLE_NAME': 'recovery',
+            'AWS_REGION': 'ap-south-1', 'MOM_RECOVERY_IDLE_GATE': 'true'}
+        reads = []
+        def get_item(**kwargs):
+            reads.append(kwargs)
+            return {'Item': {'pk': {'S': RECOVERY_ACTIVITY_KEY}, 'initialized': {'BOOL': True}, 'activeCount': {'N': '0'}}}
+        client = SimpleNamespace(get_item=get_item)
+        mom_worker.repository.cache_clear()
+        try:
+            with patch.dict('os.environ', environment), patch('app.mom.repository.boto3.client', return_value=client):
+                for _ in range(60): self.assertEqual(mom_worker.sweep({}, None), {'ok': True})
+            self.assertEqual(len(reads), 60)
+            self.assertTrue(all(read['ConsistentRead'] for read in reads))
+        finally:
+            mom_worker.repository.cache_clear()
+
+    def test_work_and_activity_counter_commit_in_one_transaction(self):
+        transactions = []
+        client = SimpleNamespace(transact_write_items=lambda **args: transactions.append(args))
+        repo = Repository(table='mom', bucket='private', key_arn='key', queue='queue', region='region', clients={'dynamodb': client})
+        repo.put({'pk': 'MOM#test', 'version': 2, 'state': 'sent'}, version=1, activity_delta=-1)
+        items = transactions[0]['TransactItems']
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]['Put']['ConditionExpression'], '#v = :v')
+        self.assertEqual(items[1]['Update']['Key']['pk']['S'], RECOVERY_ACTIVITY_KEY)
+        self.assertEqual(items[1]['Update']['ExpressionAttributeValues'][':delta']['N'], '-1')
+        self.assertIn('ConditionExpression', items[1]['Update'])
+
     def test_warm_sweeps_reuse_connection_pool_without_caching_work(self):
         environment = {'MOM_TABLE_NAME': 'mom', 'MOM_BUCKET_NAME': 'private',
             'MOM_KEY_ARN': 'key', 'MOM_QUEUE_URL': 'queue', 'AUTH_TABLE_NAME': 'recovery',
@@ -130,6 +167,55 @@ class MomTests(unittest.TestCase):
     def processor(self, ses=None, summarize=None, resolve_email=None):
         return Processor(self.repo, summarize=summarize or (lambda text, row: 'Next steps\n• Send proposal after approval.'),
             resolve_email=resolve_email or (lambda row: 'verified@example.com'), ses=ses or Ses(), sender='no-reply@example.com', configuration_set='mom')
+
+    def test_idle_gate_wakes_on_create_and_stays_awake_until_cleanup(self):
+        self.repo.rows[RECOVERY_ACTIVITY_KEY] = {'pk': RECOVERY_ACTIVITY_KEY, 'initialized': True, 'activeCount': 0}
+        self.assertTrue(self.repo.recovery_idle())
+        first = self.begin()
+        second = self.begin('other', room='xyz-abcd-efg')
+        self.assertFalse(self.repo.recovery_idle())
+        self.assertEqual(self.repo.rows[RECOVERY_ACTIVITY_KEY]['activeCount'], 2)
+        self.repo.detach(first, finish=True)
+        self.processor().process(first['pk'])
+        self.assertEqual(self.repo.rows[RECOVERY_ACTIVITY_KEY]['activeCount'], 1)
+        self.repo.detach(second, finish=True)
+        self.processor().process(second['pk'])
+        self.assertTrue(self.repo.recovery_idle())
+        self.processor().process(second['pk'])
+        self.assertEqual(self.repo.rows[RECOVERY_ACTIVITY_KEY]['activeCount'], 0)
+
+    def test_missing_gate_never_suppresses_legacy_work_and_is_enabled_explicitly(self):
+        self.assertFalse(self.repo.recovery_idle())
+        row = self.begin()
+        self.repo.rows[row['pk']].pop('recoveryTracked')
+        self.repo.rows.pop(RECOVERY_ACTIVITY_KEY)
+        self.repo.detach(self.repo.get(row['pk']))
+        self.assertTrue(self.repo.get(row['pk'])['recoveryTracked'])
+        self.assertEqual(self.repo.get(RECOVERY_ACTIVITY_KEY)['activeCount'], 1)
+        self.assertFalse(self.repo.recovery_idle())
+
+    def test_failed_cleanup_and_uncertain_email_keep_recovery_enabled(self):
+        self.repo.rows[RECOVERY_ACTIVITY_KEY] = {'pk': RECOVERY_ACTIVITY_KEY, 'initialized': True, 'activeCount': 0}
+        row = self.begin(); self.record(row); self.repo.detach(row, finish=True)
+        self.processor(Ses(TimeoutError())).process(row['pk'])
+        self.assertFalse(self.repo.recovery_idle())
+        self.repo.now[0] += 86401
+        self.repo.s3.fail_delete = True
+        sweep_repository(self.repo)
+        self.assertEqual(self.repo.get(RECOVERY_ACTIVITY_KEY)['activeCount'], 1)
+        self.repo.s3.fail_delete = False
+        sweep_repository(self.repo)
+        self.assertTrue(self.repo.recovery_idle())
+
+    def test_duplicate_touches_in_same_second_do_not_change_deadlines_or_write_again(self):
+        row = self.begin()
+        version = row['version']
+        for _ in range(3): self.repo.touch(row)
+        self.assertEqual(self.repo.get(row['pk'])['version'], version)
+        self.repo.now[0] += 1
+        renewed = self.repo.touch(row)
+        self.assertEqual(renewed['version'], version + 1)
+        self.assertEqual(renewed['finalizeAfter'], self.repo.now[0] + 600)
 
     def test_new_users_are_off_without_a_preference_record(self):
         self.assertEqual(self.repo.preferences('new')['mode'], 'live_only')
@@ -358,6 +444,24 @@ class MomRouteTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MomStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_idle_recaps_keep_ownership_without_reuploading_checkpoints(self):
+        db = MemoryStore(); repo = MemoryRepository()
+        repo.set_preferences('A', 'mom_only', 'UTC', 'verified-A')
+        class Socket(RecoverySocket):
+            async def receive_text(self):
+                payload = json.loads(await super().receive_text())
+                return json.dumps({**payload, 'roomId': 'opt-test-room'})
+            async def receive(self):
+                await asyncio.sleep(5.4)
+                return {'type': 'websocket.receive', 'text': json.dumps({'type': 'end', 'lastSequence': 0})}
+        ws = Socket(db); ws.app.state.mom = repo
+        with patch.object(route, 'mom_available', return_value=True), patch.object(route, 'mom_repository', return_value=repo):
+            await asyncio.wait_for(route.meeting_stream(ws), 7)
+        self.assertEqual(len(repo.s3.arguments), 1)
+        self.assertEqual(len(db.crypto.keys), 1)
+        self.assertTrue(any(message['type'] == 'heartbeat' for message in ws.sent))
+        self.assertTrue(any(message['type'] == 'meeting_segment_ended' for message in ws.sent))
+
     async def test_mom_only_does_not_open_connectors_or_run_live_models_and_drains_end(self):
         await self.check_mom_stream('abc-defg-hij')
 

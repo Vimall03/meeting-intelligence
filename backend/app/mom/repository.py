@@ -19,6 +19,7 @@ MODES = {'live_only', 'mom_only', 'both'}
 ROOM = re.compile(r'(?:[a-z0-9]{2,4}-[a-z0-9]{2,4}-[a-z0-9]{2,4}|zoom:[0-9]{9,11})')
 IDENTIFIER = re.compile(r'[A-Za-z0-9_-]{1,128}')
 TERMINAL = {'sent', 'empty', 'expired'}
+RECOVERY_ACTIVITY_KEY = 'RECOVERY#ACTIVITY'
 
 
 class MomError(Exception):
@@ -71,7 +72,24 @@ class Repository:
             Key={'pk': {'S': key}}, ConsistentRead=True).get('Item')
         return decode({k: TypeDeserializer().deserialize(v) for k, v in item.items()}) if item else None
 
-    def put(self, row, *, version=None):
+    @staticmethod
+    def activity_update(table, delta):
+        update = {'TableName': table, 'Key': {'pk': {'S': RECOVERY_ACTIVITY_KEY}},
+            'UpdateExpression': 'ADD activeCount :delta',
+            'ExpressionAttributeValues': {':delta': {'N': str(delta)}}}
+        if delta < 0:
+            update['ConditionExpression'] = 'activeCount >= :one'
+            update['ExpressionAttributeValues'][':one'] = {'N': '1'}
+        return {'Update': update}
+
+    def recovery_idle(self):
+        activity = self.get(RECOVERY_ACTIVITY_KEY)
+        # Missing/uninitialized metadata always keeps the original full sweep.
+        # Initialization happens only after all writers use atomic tracking.
+        return bool(activity and activity.get('initialized') is True
+            and activity.get('activeCount') == 0)
+
+    def put(self, row, *, version=None, activity_delta=0):
         serializer = TypeSerializer()
         args = {'TableName': self.table, 'Item': {k: serializer.serialize(v) for k, v in encode(row).items()}}
         if version is None:
@@ -79,16 +97,29 @@ class Repository:
         else:
             args.update(ConditionExpression='#v = :v', ExpressionAttributeNames={'#v': 'version'},
                 ExpressionAttributeValues={':v': {'N': str(version)}})
-        try: self.client('dynamodb').put_item(**args)
+        try:
+            if activity_delta:
+                self.client('dynamodb').transact_write_items(TransactItems=[{'Put': args},
+                    self.activity_update(self.table, activity_delta)])
+            else:
+                self.client('dynamodb').put_item(**args)
         except Exception as exc:
-            if getattr(exc, 'response', {}).get('Error', {}).get('Code') == 'ConditionalCheckFailedException': raise Conflict() from None
+            if getattr(exc, 'response', {}).get('Error', {}).get('Code') in ('ConditionalCheckFailedException', 'TransactionCanceledException'):
+                raise Conflict() from None
             raise
         return row
 
     def replace(self, row, **changes):
         updated = {**row, **changes, 'version': int(row['version']) + 1}
         updated = {k: v for k, v in updated.items() if v is not None}
-        return self.put(updated, version=row['version'])
+        delta = 0
+        if row['pk'].startswith('MOM#'):
+            if updated['state'] in TERMINAL:
+                delta = -1 if row.get('recoveryTracked') else 0
+                updated.pop('recoveryTracked', None)
+            elif not row.get('recoveryTracked'):
+                updated['recoveryTracked'], delta = True, 1
+        return self.put(updated, version=row['version'], activity_delta=delta)
 
     def create_room(self, pointer, row, prior):
         serializer = TypeSerializer()
@@ -100,7 +131,7 @@ class Repository:
         try:
             self.client('dynamodb').transact_write_items(TransactItems=[{'Put': room_put}, {'Put': {
                 'TableName': self.table, 'Item': {k: serializer.serialize(v) for k, v in row.items()},
-                'ConditionExpression': 'attribute_not_exists(pk)'}}])
+                'ConditionExpression': 'attribute_not_exists(pk)'}}, self.activity_update(self.table, 1)])
         except Exception as exc:
             if getattr(exc, 'response', {}).get('Error', {}).get('Code') == 'TransactionCanceledException': raise Conflict() from None
             raise
@@ -154,7 +185,8 @@ class Repository:
                 'roomId': room, 'mode': prefs['mode'], 'timezone': prefs['timezone'], 'version': 1,
                 'state': 'active', 'owner': secrets.token_hex(16), 'leaseUntil': now + self.LEASE_SECONDS,
                 'startedAt': now, 'finalizeAfter': now + self.grace, 'purgeAt': now + self.retention,
-                'dueAt': min(now + self.grace, now + self.retention), 'captures': [capture], 'attempts': 0}
+                'dueAt': min(now + self.grace, now + self.retention), 'captures': [capture], 'attempts': 0,
+                'recoveryTracked': True}
             pointer = {'pk': pointer_key, 'sessionKey': row['pk'], 'version': int(pointer['version']) + 1 if pointer else 1,
                 'expiresAt': now + 30 * 86400}
             try:
@@ -174,6 +206,8 @@ class Repository:
     def touch(self, attachment):
         row = self.owned(attachment)
         now = int(self.clock())
+        if row.get('leaseUntil') == now + self.LEASE_SECONDS and row['finalizeAfter'] == now + self.grace:
+            return row
         return self.replace(row, leaseUntil=now + self.LEASE_SECONDS,
             finalizeAfter=now + self.grace, dueAt=min(now + self.grace, row['purgeAt']))
 
@@ -293,6 +327,7 @@ class Repository:
         self.unlink_room(row)
         # Small tombstone only. No username, transcript, summary, title or recipient remains.
         minimal = {k: row[k] for k in ['pk', 'sessionId', 'userId', 'version']}
+        if row.get('recoveryTracked'): minimal['recoveryTracked'] = True
         minimal.update(state=final_state, sentAt=row.get('sentAt'), messageId=row.get('messageId'),
             supportCode=row.get('supportCode'), expiresAt=int(self.clock()) + 30 * 86400)
         return self.replace(minimal, **{k: v for k, v in minimal.items() if k not in ('pk', 'version')})
