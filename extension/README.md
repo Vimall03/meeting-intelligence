@@ -33,4 +33,4 @@ Use `lib/user-messages.ts` and `userError` for every error display, with stable 
 
 ## Release verification
 
-Automated checks cover room detection, waiting-room rejection, platform isolation, capture/rejoin behavior, microphone cleanup, sign-in, timeline contracts, and recap state. A live two-person Zoom call with remote audio, microphone audio, reconnect, and recap verification is still required before promoting Zoom support out of preview or submitting this release to the Web Store.
+Automated checks cover room detection, waiting-room rejection, platform isolation, capture/rejoin behavior, microphone cleanup, sign-in, timeline contracts, and recap state. A live two-person Zoom call with remote audio, microphone audio, reconnect, and recap verification is still required before promoting Zoom support out of preview. The release remains labelled as a Zoom browser preview in the Web Store submission.
