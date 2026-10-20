@@ -1,6 +1,6 @@
 # Transcription provider comparison — 20 October 2026
 
-The [completed OpenRouter comparison](../stt-openrouter-2026-10-20/REPORT.md) now tests seven configurations using the existing key and includes all earlier results. The direct streaming configurations below remain untested.
+The [21 October controlled AWS streaming test](../stt-streaming-control-2026-10-21/REPORT.md) measures continuous recognition versus context resets. The [OpenRouter comparison](../stt-openrouter-2026-10-20/REPORT.md) is a supplemental chunked-model study. The requested peer-provider streaming comparison remains incomplete; direct streaming configurations below remain untested.
 
 **Status: incomplete; the new streaming providers still require credentials or successful runs.**
 

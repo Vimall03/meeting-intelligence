@@ -37,6 +37,10 @@ def render(state, earlier, legacy, offline):
     complete = all(stats['measured_runs'] == expected and not stats['failed_runs'] for stats in summary.values())
     lines = ['# OpenRouter transcription comparison — 20 October 2026', '',
         '**Status: ' + ('all seven OpenRouter configurations measured.' if complete else 'run incomplete; see measured/failed counts.') + '**', '',
+        '**The requested peer-provider streaming comparison remains incomplete. This is a supplemental '
+        'chunked-model study; AWS is the only service measured with continuous audio input.**', '',
+        'The [21 October controlled AWS streaming test](../stt-streaming-control-2026-10-21/REPORT.md) '
+        'compares continuous recognition with context resets using the same AWS service and PCM audio.', '',
         'All seven candidates use the existing OpenRouter key, sent only to OpenRouter. '
         '**These are completed three-second audio requests, not persistent streaming.** '
         'The AWS row is the earlier continuous-streaming test on identical source audio. '

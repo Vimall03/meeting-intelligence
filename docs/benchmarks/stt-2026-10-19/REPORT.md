@@ -1,6 +1,6 @@
 # Streaming transcription comparison — 19 October 2026
 
-See the [20 October OpenRouter comparison](../stt-openrouter-2026-10-20/REPORT.md) for seven tested configurations, refreshed costs and all earlier results. This report preserves the original experiment.
+Later evidence: the [21 October controlled AWS streaming test](../stt-streaming-control-2026-10-21/REPORT.md) examines context boundaries, and the [20 October OpenRouter comparison](../stt-openrouter-2026-10-20/REPORT.md) compares chunked models and costs. This report preserves the original experiment. Peer-provider streaming comparisons remain incomplete.
 
 **Decision: keep the streaming implementation as a disabled canary.** It improves typical final-text latency and accuracy in this controlled test, but sustained noise produces worse tail latency, and transparent reconnect/replay is not yet implemented for the new transport. The public 0.1.12 package and its Web Store submission are unchanged.
 

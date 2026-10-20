@@ -1,0 +1,8 @@
+{
+  "endpoint": "https://openrouter.ai/api/v1/realtime?intent=transcription",
+  "status": 404,
+  "content_type": "application/json",
+  "websocket_upgrade_accepted": false,
+  "audio_sent": false,
+  "redirects_followed": false
+}

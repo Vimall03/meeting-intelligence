@@ -2,9 +2,13 @@
 
 **Status: all seven OpenRouter configurations measured.**
 
-All seven candidates use the existing OpenRouter key, sent only to OpenRouter. **These are completed three-second audio requests, not persistent streaming.** The AWS row is the earlier continuous-streaming test on identical source audio. No production provider, package, deployment or meeting behaviour changed.
+**The requested peer-provider streaming comparison remains incomplete. This is a supplemental chunked-model study; AWS is the only service measured with continuous audio input.**
 
 **Recommendation from this small test: evaluate MAI-Transcribe 2 on broader held-out meeting audio next.** It had 47% fewer word errors than the fresh GPT chunks and 63% lower model charges, with similar typical delay. AWS streaming remains more accurate and typically faster on this corpus. This supports a cheaper candidate for the current chunk path; it does not establish equal streaming performance.
+
+The [21 October controlled AWS streaming test](../stt-streaming-control-2026-10-21/REPORT.md) compares continuous recognition with context resets using the same AWS service and PCM audio.
+
+All seven candidates use the existing OpenRouter key, sent only to OpenRouter. **These are completed three-second audio requests, not persistent streaming.** The AWS row is the earlier continuous-streaming test on identical source audio. No production provider, package, deployment or meeting behaviour changed.
 
 ## Accuracy, latency and cost
 
@@ -145,4 +149,4 @@ From `backend/`:
 - [NVIDIA: Parakeet TDT 0.6B v3](https://openrouter.ai/nvidia/parakeet-tdt-0.6b-v3)
 - [OpenAI: Whisper Large V3 Turbo](https://openrouter.ai/openai/whisper-large-v3-turbo)
 
-Generated 2026-10-20T15:15:35.159077+00:00.
+Generated 2026-10-20T16:10:50.168808+00:00.
