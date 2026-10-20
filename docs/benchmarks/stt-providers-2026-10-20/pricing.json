@@ -1,0 +1,58 @@
+{
+  "checked_at": "2026-10-20T14:56:16.186425+00:00",
+  "currency": "USD",
+  "basis": "Public base transcription rates, before taxes, credits, infrastructure and optional add-ons. Not invoices.",
+  "aws": {
+    "region": "ap-south-1",
+    "sku": "GMX2RE7GZJ5RKAYN",
+    "dimension": {
+      "unit": "second",
+      "endRange": "Inf",
+      "description": "$0.0001 per second for TranscribeAudio in Asia Pacific (Mumbai)",
+      "appliesTo": [],
+      "rateCode": "GMX2RE7GZJ5RKAYN.JRTCKXETXF.6YS6EN2CT7",
+      "beginRange": "0",
+      "pricePerUnit": {
+        "USD": "0.0001000000"
+      }
+    },
+    "effective_date": "2026-06-01T00:00:00Z",
+    "hourly_usd": 0.36,
+    "billing": "Current public page says one-second increments, no minimum. Raw runner retains the older conservative 15-second estimate.",
+    "source": "https://aws.amazon.com/transcribe/pricing/"
+  },
+  "openrouter_chunks": {
+    "model": "openai/gpt-transcribe",
+    "hourly_usd": 0.27,
+    "source": "https://openrouter.ai/openai/gpt-transcribe"
+  },
+  "soniox": {
+    "model": "stt-rt-v5",
+    "approximate_hourly_usd": 0.12,
+    "billing": "Token based; published approximate hourly equivalent. No translation or custom context in planned test.",
+    "source": "https://soniox.com/pricing"
+  },
+  "assemblyai": {
+    "model": "universal-streaming-english",
+    "hourly_usd": 0.15,
+    "billing": "Entire connected session including silence. Speaker labels and other paid add-ons disabled.",
+    "source": "https://www.assemblyai.com/pricing"
+  },
+  "deepgram": {
+    "model": "nova-3",
+    "promotional_hourly_usd": 0.288,
+    "regular_hourly_usd": 0.462,
+    "billing": "Monolingual PAYG, no paid add-ons. Promotional rate can expire.",
+    "source": "https://deepgram.com/pricing"
+  },
+  "openai_turns": {
+    "model": "gpt-transcribe",
+    "hourly_usd": 0.27,
+    "source": "https://developers.openai.com/api/docs/pricing"
+  },
+  "openai_live": {
+    "model": "gpt-live-transcribe",
+    "hourly_usd": 1.02,
+    "source": "https://developers.openai.com/api/docs/pricing"
+  }
+}
