@@ -1,5 +1,7 @@
 # Transcription provider comparison — 20 October 2026
 
+The [completed OpenRouter comparison](../stt-openrouter-2026-10-20/REPORT.md) now tests seven configurations using the existing key and includes all earlier results. The direct streaming configurations below remain untested.
+
 **Status: incomplete; the new streaming providers still require credentials or successful runs.**
 
 This report keeps measured accuracy/latency separate from advertised pricing. A blank measurement means untested, not zero errors or instant results. No production provider, deployment, extension package or meeting behaviour was changed.
