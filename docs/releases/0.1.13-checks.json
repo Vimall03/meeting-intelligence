@@ -17,7 +17,21 @@
     "changed_source_and_package_secret_scan": "passed",
     "production_legacy_compatibility": "passed",
     "production_concurrent_streams": 3,
-    "production_capacity_guard": "passed"
+    "production_capacity_guard": "passed",
+    "extension_permissions_unchanged": "passed",
+    "synthetic_test_cleanup": {
+      "synthetic_test_records_removed": 30,
+      "production_user_records_touched": 0
+    },
+    "live_website": {
+      "/": "matches deployed source",
+      "/beta.html": "matches deployed source",
+      "/privacy": "matches deployed source",
+      "/terms": "matches deployed source",
+      "download_sha256": "deca2de1bef29a8be4ffda44d18fc155ead1c4824da17f8144b893e6cd799a31",
+      "legacy_download": "available",
+      "unknown_route": "404 with safe support code"
+    }
   },
   "container": {
     "platform": "linux/amd64",
@@ -150,5 +164,14 @@
     "installed_legacy": "/ws/meeting",
     "legacy_container_unchanged": true,
     "new_compute_resources": 0
+  },
+  "source_commit": "c7b5124",
+  "infra_commit": "1ee330e",
+  "website_commit": "9c2cb1d",
+  "website_deployed": true,
+  "web_store": {
+    "published_version": "0.1.12",
+    "prepared_version": "0.1.13",
+    "submission_status": "not submitted; Mac locked"
   }
 }
