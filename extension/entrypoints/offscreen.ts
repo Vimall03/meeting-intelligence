@@ -226,7 +226,7 @@ async function start(streamId: string, sessionId: string, room?: string, userId?
 
   // The tab stream contains other participants and shared media. The local
   // speaker's voice is not played back into the tab, so capture the mic
-  // separately and mix both sources into one WebM/Opus stream.
+  // separately and mix both sources for continuous listening.
   try {
     const selectedMicrophone = await navigator.mediaDevices.getUserMedia({
       audio: {

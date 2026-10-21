@@ -2,34 +2,41 @@
   "date": "2026-10-21",
   "version": "0.1.13",
   "branch": "streaming-release",
-  "production_deployed": false,
+  "production_deployed": true,
   "checks": {
-    "backend_tests": 187,
-    "linux_locked_runtime_tests": 187,
+    "backend_tests": 192,
+    "linux_locked_runtime_tests": 192,
     "extension_tests": 101,
     "extension_typecheck": "passed",
     "production_package": "passed",
-    "infra_typescript_tests": 29,
-    "infra_python_tests": 37,
+    "infra_typescript_tests": 31,
+    "infra_python_tests": 39,
     "infra_typecheck_and_synth": "passed",
     "runtime_source_hashes_matched": 27,
     "runtime_liveness_and_shutdown": "passed",
-    "changed_source_and_package_secret_scan": "passed"
+    "changed_source_and_package_secret_scan": "passed",
+    "production_legacy_compatibility": "passed",
+    "production_concurrent_streams": 3,
+    "production_capacity_guard": "passed"
   },
   "container": {
     "platform": "linux/amd64",
     "baseline_docker_reported_bytes": 279858572,
-    "streaming_docker_reported_bytes": 86028745,
+    "streaming_docker_reported_bytes": 86029244,
     "reduction_percent": 69.26,
     "isolated_idle_memory_mib": 77.11,
     "runtime_contains_tests": false,
     "runtime_contains_ffmpeg_or_numpy": false,
-    "runtime_contains_worker_only_modules": false
+    "runtime_contains_worker_only_modules": false,
+    "production_memory_mib_after_checks": 116.1,
+    "production_memory_limit_mib": 256,
+    "production_oom_killed": false,
+    "production_restarts": 0
   },
   "package": {
     "filename": "meeting-intelligence-0.1.13.zip",
-    "bytes": 526161,
-    "sha256": "84c5a25da1562a707d3f9c653c0d4107734d2ea8c2d8d93380b9d3e138a3fc82",
+    "bytes": 526173,
+    "sha256": "deca2de1bef29a8be4ffda44d18fc155ead1c4824da17f8144b893e6cd799a31",
     "extension_id": "ifednlgahhhflcbaojjhfphiockifodk"
   },
   "browser_aws_check": {
@@ -68,7 +75,80 @@
   "remaining_release_checks": [
     "Real Google Meet call",
     "Two-person Zoom browser call; Zoom remains preview",
-    "Production relay/concurrent-load verification",
-    "Compatible server/extension rollout; old installed extensions require existing server"
-  ]
+    "Chrome Web Store upload/submission: Mac unlock required"
+  ],
+  "browser_production_check": {
+    "result": {
+      "ok": true
+    },
+    "partials": 22,
+    "finals": [
+      "Please send the revised launch plan to Maya before Friday afternoon.",
+      "Please send the revised launch plan to Maya before Friday afternoon. The design is approved, but the payment tests still need an owner.",
+      "Please send the revised launch plan to Maya before Friday afternoon. The design is approved, but the payment tests still need an owner. We will review the results together at the next meeting.",
+      "Please send the revised launch plan to Maya before Friday afternoon. The design is approved, but the payment tests still need an owner. We will review the results together at the next meeting."
+    ],
+    "ack": 251648,
+    "sockets": 2,
+    "tracksEnded": true,
+    "errors": [],
+    "recoveries": 2,
+    "passed": true
+  },
+  "production_relay_check": {
+    "region": "ap-south-1",
+    "host_type": "t3.micro",
+    "results": [
+      {
+        "case": "reconnect",
+        "audio_seconds": 28.282125,
+        "connections": 2,
+        "recovered": true,
+        "partials": 40,
+        "final_updates": 7,
+        "ack_samples": 452514,
+        "completed": true,
+        "elapsed_s": 28.720092625007965
+      },
+      {
+        "case": "human-speech",
+        "audio_seconds": 28.96,
+        "connections": 1,
+        "recovered": false,
+        "partials": 52,
+        "final_updates": 3,
+        "ack_samples": 463360,
+        "completed": true,
+        "elapsed_s": 29.419039250002243
+      },
+      {
+        "case": "noise-silence",
+        "audio_seconds": 36.12825,
+        "connections": 1,
+        "recovered": false,
+        "partials": 32,
+        "final_updates": 2,
+        "ack_samples": 578052,
+        "completed": true,
+        "elapsed_s": 36.58807837500353
+      },
+      {
+        "legacy_route": "passed",
+        "old_audio_ack": 1
+      },
+      {
+        "capacity_limit": "passed",
+        "extra_paid_stream_opened": false
+      }
+    ],
+    "tested_input_seconds": 93.370375,
+    "limit_transcription_audio_seconds": 150,
+    "aws_rate_usd_per_second": 0.0001
+  },
+  "production_routing": {
+    "streaming": "/ws/meeting/stream",
+    "installed_legacy": "/ws/meeting",
+    "legacy_container_unchanged": true,
+    "new_compute_resources": 0
+  }
 }

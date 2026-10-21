@@ -7,7 +7,7 @@ function secureBase(value: string) {
 }
 export const BACKEND_HTTP_BASE_URL = secureBase(import.meta.env.WXT_BACKEND_URL || 'http://localhost:8000');
 export const AUTH_API_URL = secureBase(import.meta.env.WXT_AUTH_API_URL || '');
-export const MEETING_SOCKET_URL = `${BACKEND_HTTP_BASE_URL.replace(/^http/, 'ws')}/ws/meeting`;
+export const MEETING_SOCKET_URL = `${BACKEND_HTTP_BASE_URL.replace(/^http/, 'ws')}/ws/meeting/stream`;
 export const GOOGLE_DRIVE_STATUS_URL = `${BACKEND_HTTP_BASE_URL}/api/integrations/google-drive/status`;
 export const GOOGLE_DRIVE_AUTH_START_URL = `${BACKEND_HTTP_BASE_URL}/api/integrations/google-drive/auth/start`;
 export const GOOGLE_DRIVE_AUTH_TAB_KEY = 'googleDriveOAuthPending';

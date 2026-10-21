@@ -49,9 +49,26 @@ class UserStore:
                        ExpressionAttributeValues={':v': encode(version)})
         try:
             if family:
-                await asyncio.to_thread(lambda: self._db().transact_write_items(TransactItems=[
+                transaction = [
                     {'Put': put}, {'ConditionCheck': {'TableName': settings.auth_table_name,
-                    'Key': {'pk': {'S': 'REVOKED#' + family}}, 'ConditionExpression': 'attribute_not_exists(pk)'}}]))
+                    'Key': {'pk': {'S': 'REVOKED#' + family}}, 'ConditionExpression': 'attribute_not_exists(pk)'}}]
+                def commit():
+                    # Concurrent meetings in one login share the revocation fence.
+                    # DynamoDB may briefly conflict even when both checks are reads.
+                    # Retry the identical transaction, never re-encrypt or weaken
+                    # the version/revocation conditions. Other failures stay fatal.
+                    for attempt in range(3):
+                        try:
+                            return self._db().transact_write_items(TransactItems=transaction)
+                        except Exception as error:
+                            response = getattr(error, 'response', {})
+                            codes = {r.get('Code') for r in response.get('CancellationReasons', [])}
+                            retryable = (response.get('Error', {}).get('Code') == 'TransactionCanceledException'
+                                and 'TransactionConflict' in codes and codes <= {'None', 'TransactionConflict'})
+                            if not retryable or attempt == 2:
+                                raise
+                            time.sleep(.02 * 3**attempt + secrets.randbelow(20)/1000)
+                await asyncio.to_thread(commit)
             else:
                 await asyncio.to_thread(lambda: self._db().put_item(**put))
         except Exception as exc:

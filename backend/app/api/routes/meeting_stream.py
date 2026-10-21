@@ -55,7 +55,7 @@ async def search_atlassian(atlassian, search_terms) -> dict:
     return await atlassian.search_relevant_files(search_terms, top_k=5)
 
 
-@router.websocket("/ws/meeting")
+@router.websocket("/ws/meeting/stream")
 async def meeting_stream(websocket: WebSocket):
     with log_context(request_id=new_id(), connection_id=new_id(), user_id=None,
                      meeting_id=None, operation_id=None, job_id=None, sequence=None):
@@ -70,6 +70,9 @@ async def _meeting_stream(websocket: WebSocket):
         await websocket.close(code=1012, reason='MI-CON-004')
         return
     await websocket.accept()
+    if registry and (registry.draining or len(registry.sockets) >= settings.streaming_max_connections):
+        await websocket.close(code=1013, reason='MI-CON-009')
+        return
     if registry:
         registry.sockets.add(websocket)
     db = websocket.app.state.users
@@ -200,8 +203,8 @@ async def _meeting_stream(websocket: WebSocket):
     streaming_update_task = None
     streaming_finish_task = None
     streaming_ended = False
-    frame_rate_started = time.monotonic()
-    frame_rate_count = 0
+    frame_budget_at = time.monotonic()
+    frame_budget = 50.0
     meeting_context = MeetingContextService(
         window_seconds=settings.meeting_context_window_seconds,
         turn_gap_seconds=settings.meeting_context_turn_gap_seconds,
@@ -410,10 +413,14 @@ async def _meeting_stream(websocket: WebSocket):
                         raise failure()
                     control = json.loads(message['text'])
                     if control.get('type') == 'audio':
-                        if time.monotonic() - frame_rate_started >= 1:
-                            frame_rate_started, frame_rate_count = time.monotonic(), 0
-                        frame_rate_count += 1
-                        if frame_rate_count > 12: raise failure('MI-AUTH-102', 429)
+                        # Storage/analysis can delay reads, then release valid queued
+                        # frames together. Permit a bounded burst while retaining a
+                        # 2x-real-time sustained budget and the separate queue cap.
+                        frame_now = time.monotonic()
+                        frame_budget = min(50.0, frame_budget + (frame_now-frame_budget_at)*10)
+                        frame_budget_at = frame_now
+                        if frame_budget < 1: raise failure('MI-AUTH-102', 429)
+                        frame_budget -= 1
                     else:
                         await db.limit(principal.sub, 'meeting-controls', 120, 60)
                     if control.get('type') == 'ping':

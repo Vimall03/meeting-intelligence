@@ -554,7 +554,7 @@ test('live-only stop never sends a MOM finalization or persists minutes metadata
 });
 
 test('streaming capture keeps one encoder and socket for continuous PCM and drains on stop', async()=>{
-  const h=harness({streaming:true});
+  const h=harness();
   await h.send({type:'START_OFFSCREEN',streamId:'tab',captureSessionId:'streaming-session'});
   assert.equal(h.pcmCaptures.length,1);
   assert.equal(h.sockets[0].controls[0].audioFormat,'pcm_s16le_16000_v2');
@@ -570,7 +570,7 @@ test('streaming capture keeps one encoder and socket for continuous PCM and drai
 });
 
 test('streaming stops hardware immediately while final PCM is being flushed',async()=>{
-  const h=harness({streaming:true,deferPcmFinish:true});
+  const h=harness({deferPcmFinish:true});
   await h.send({type:'START_OFFSCREEN',streamId:'tab',captureSessionId:'streaming-session'});
   const stopping=h.send({type:'STOP_OFFSCREEN'});
   assert.equal(h.microphone.getTracks()[0].readyState,'ended');

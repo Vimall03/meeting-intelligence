@@ -194,3 +194,43 @@ class AuthIntegrationTests(unittest.IsolatedAsyncioTestCase):
         new = CredentialStore(self.db, 'A', 'google_drive'); await new.read(); await new.write({'access_token': 'new', 'refresh_token': 'new'})
         with self.assertRaises(StoreConflict): await old.clear()
         self.assertEqual((await new.read())['access_token'], 'new')
+
+
+class StorageTransactionTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        table = patch.object(settings, 'auth_table_name', 'test-table')
+        table.start()
+        self.addCleanup(table.stop)
+
+    async def check_failure(self, codes, expected_calls):
+        from unittest.mock import MagicMock
+        from botocore.exceptions import ClientError
+        from app.services.user_store import UserStore,StoreConflict
+        db=UserStore();client=MagicMock();db._table=client
+        error=ClientError({'Error':{'Code':'TransactionCanceledException'},
+            'CancellationReasons':[{'Code':code} for code in codes]},'TransactWriteItems')
+        client.transact_write_items.side_effect=error
+        with self.assertRaises(StoreConflict):
+            await db.put('USER#test#MEETING#one',{'version':2},version=1,family='login')
+        self.assertEqual(client.transact_write_items.call_count,expected_calls)
+        calls=client.transact_write_items.call_args_list
+        self.assertTrue(all(call==calls[0] for call in calls))
+
+    async def test_shared_fence_conflicts_retry_same_transaction_with_a_bounded_budget(self):
+        await self.check_failure(['None','TransactionConflict'],3)
+
+    async def test_revocation_or_version_conflicts_never_retry(self):
+        for codes in [['None','ConditionalCheckFailed'],['TransactionConflict','ConditionalCheckFailed'],[]]:
+            await self.check_failure(codes,1)
+
+    async def test_transient_conflict_can_commit_without_changing_the_fences(self):
+        from unittest.mock import MagicMock
+        from botocore.exceptions import ClientError
+        from app.services.user_store import UserStore
+        db=UserStore();db._table=MagicMock()
+        db._table.transact_write_items.side_effect=[ClientError({'Error':{'Code':'TransactionCanceledException'},
+            'CancellationReasons':[{'Code':'None'},{'Code':'TransactionConflict'}]},'TransactWriteItems'),{}]
+        await db.put('USER#test#MEETING#one',{'version':2},version=1,family='login')
+        calls=db._table.transact_write_items.call_args_list
+        self.assertEqual(len(calls),2);self.assertEqual(calls[0],calls[1])
+        self.assertIn('ConditionCheck',calls[0].kwargs['TransactItems'][1])

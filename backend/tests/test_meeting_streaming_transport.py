@@ -135,5 +135,27 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({c['kind'] for c in cards},{'task_suggestion','search_results'})
         self.assertTrue(any(m['type']=='meeting_segment_ended' for m in socket.sent))
 
+    async def test_capacity_limit_rejects_before_opening_a_paid_stream(self):
+        socket=Socket()
+        existing={object() for _ in range(4)}
+        socket.app.state.meetings=NS(draining=False,sockets=existing.copy())
+        await self.run_socket(socket)
+        self.assertEqual(Stream.instances,[])
+        self.assertEqual(socket.closed,{'code':1013,'reason':'MI-CON-009'})
+        self.assertEqual(socket.app.state.meetings.sockets,existing)
+
+    async def test_valid_buffered_frames_survive_a_brief_processing_pause(self):
+        class BufferedSocket(Socket):
+            async def send_json(self,message):
+                self.sent.append(message)
+                if message['type']=='auth_ready':
+                    for n in range(30):
+                        await self.queue.put({'text':json.dumps({'type':'audio','startSample':n*3200})})
+                        await self.queue.put({'bytes':bytes(6400)})
+                    await self.queue.put({'text':json.dumps({'type':'end','lastSequence':96000})})
+        socket=BufferedSocket();await self.run_socket(socket)
+        self.assertEqual(len(Stream.instances[0].frames),30)
+        self.assertTrue(any(m['type']=='meeting_segment_ended' and m['ack']==96000 for m in socket.sent))
+
 
 if __name__=='__main__':unittest.main()

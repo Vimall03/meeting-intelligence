@@ -272,7 +272,7 @@ class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 if task.done(): await task
                 await asyncio.sleep(.01)
             self.assertTrue(server.started)
-            return server, task, listener, f'ws://127.0.0.1:{listener.getsockname()[1]}/ws/meeting'
+            return server, task, listener, f'ws://127.0.0.1:{listener.getsockname()[1]}/ws/meeting/stream'
 
         async def transcribe(audio):
             return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': 'retained words'}]}
