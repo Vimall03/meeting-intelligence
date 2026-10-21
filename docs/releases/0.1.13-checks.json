@@ -89,7 +89,7 @@
   "remaining_release_checks": [
     "Real Google Meet call",
     "Two-person Zoom browser call; Zoom remains preview",
-    "Chrome Web Store upload/submission: Mac unlock required"
+    "Chrome Web Store review/approval"
   ],
   "browser_production_check": {
     "result": {
@@ -172,6 +172,9 @@
   "web_store": {
     "published_version": "0.1.12",
     "prepared_version": "0.1.13",
-    "submission_status": "not submitted; Mac locked"
+    "submission_status": "Pending review",
+    "submitted_version": "0.1.13",
+    "auto_publish_after_approval": true,
+    "listing_continuous_listening": "saved"
   }
 }
