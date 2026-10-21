@@ -5,10 +5,13 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 
-function harness({ failInitialName, failReplacementName, permissionState = 'prompt', deferReplacement = false, deferFirstClose = false, deferFirstRecorderStop = false, acknowledge = true, momMode, autoEnd = true, streaming = false, deferPcmFinish = false, clock = { now: Date.now() } } = {}) {
-  const messages = [], timeouts = new Map(), intervals = new Map(), sockets = [], recorders = [], contexts = [];
+const replayExports = {};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../lib/pcm-replay.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports: replayExports, require: () => userMessages });
+
+function harness({ failInitialName, failReplacementName, permissionState = 'prompt', deferReplacement = false, deferFirstClose = false, acknowledge = true, momMode, autoEnd = true, deferPcmFinish = false, clock = { now: Date.now() } } = {}) {
+  const messages = [], timeouts = new Map(), intervals = new Map(), sockets = [], contexts = [];
   const pcmCaptures = [];
-  let listener, timer = 0, serverAck = 0;
+  let listener, timer = 0, serverAck = 0, lastMeeting;
   class Clock extends Date { static now() { return clock.now; } }
   const track = () => ({ readyState: 'live', muted: false, enabled: true, stop() { this.readyState = 'ended'; } });
   const stream = () => { const audio = track(); return { active: true, getTracks: () => [audio], getAudioTracks: () => [audio], getVideoTracks: () => [] }; };
@@ -27,29 +30,20 @@ function harness({ failInitialName, failReplacementName, permissionState = 'prom
       if (typeof value === 'string') {
         const control = JSON.parse(value); this.controls.push(control);
         if (control.type === 'authenticate') queueMicrotask(() => {
+          if(control.meetingId && control.meetingId !== lastMeeting) {serverAck=0;lastMeeting=control.meetingId;}
           this.onmessage?.({ data: JSON.stringify({ type: 'auth_ready', ack: serverAck, expiresAt: Math.floor(Date.now() / 1000) + 900, expiresIn: 900,
-            ...(streaming ? {audioFormat:'pcm_s16le_16000'} : {}) }) });
+            audioFormat:'pcm_s16le_16000_v2' }) });
           if (momMode) this.onmessage?.({ data: JSON.stringify({ type: 'mom_session', sessionId: 'a'.repeat(32), mode: momMode, graceSeconds: 600 }) });
         });
         if (autoEnd && ['end', 'finish'].includes(control.type)) queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'meeting_segment_ended', ack: control.lastSequence, minutesFinalizing: control.type === 'finish' }) }));
-        if (control.type === 'audio') this.sequence = control.sequence;
+        if (control.type === 'audio') this.startSample = control.startSample;
         if (control.type === 'ping') this.onmessage?.({ data: JSON.stringify({ type: 'pong' }) });
       } else {
         this.sent.push(value);
-        if (acknowledge) { serverAck = this.sequence; this.onmessage?.({ data: JSON.stringify({ type: 'audio_ack', sequence: this.sequence }) }); }
+        if (acknowledge) { serverAck = this.startSample + value.size / 2; const ack=serverAck; queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'audio_ack', sequence: ack }) })); }
       }
     }
     close() { this.readyState = 3; this.onclose?.({ code: 1000 }); }
-  }
-  class Recorder {
-    static isTypeSupported() { return true; }
-    state = 'inactive';
-    listeners = {};
-    constructor() { recorders.push(this); }
-    start() { this.state = 'recording'; }
-    stop() { this.state = 'inactive'; if (deferFirstRecorderStop && this === recorders[0]) return; this.finishStop(); }
-    finishStop() { this.ondataavailable?.({ data: { size: 50 } }); this.onstop?.(); this.listeners.stop?.(); }
-    addEventListener(name, callback) { this.listeners[name] = callback; }
   }
   const node = () => ({ connect() {}, disconnect() {}, gain: { value: 1 }, getFloatTimeDomainData(data) { data.fill(0.1); } });
   class Context {
@@ -67,12 +61,12 @@ function harness({ failInitialName, failReplacementName, permissionState = 'prom
   const source = fs.readFileSync(new URL('../entrypoints/offscreen.ts', import.meta.url), 'utf8');
   class Pcm {
     static async start(context, stream, sink, onError) { const value=new Pcm();value.sink=sink;value.onError=onError;pcmCaptures.push(value);return value; }
-    emit(size=6400) { this.sink({size}); }
+    emit(size=6400) { this.sink(new Blob([new Uint8Array(size)])); }
     finish(sink) { this.sink=sink;this.emit(100);return deferPcmFinish ? new Promise(resolve=>{this.resolve=resolve;}) : Promise.resolve(); }
   }
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
-    exports: {}, require(name) { if (name.includes('user-messages')) return userMessages; if(name.includes('pcm-capture'))return {PcmCapture:Pcm}; return name.includes('config') ? { STREAMING_TRANSCRIPTION:streaming, AUDIO_MIME_TYPE: 'audio/webm', AUDIO_WINDOW_MS: 3000, MEETING_SOCKET_URL: 'ws://localhost' } : { isTimelineSnapshot: message => message.type === 'timeline_snapshot' }; },
-    defineUnlistedScript: callback => callback(), queueMicrotask, Date: Clock, DOMException, Error, MediaRecorder: Recorder, WebSocket: Socket, AudioContext: Context,
+    exports: {}, require(name) { if (name.includes('user-messages')) return userMessages; if(name.includes('pcm-replay'))return replayExports; if(name.includes('pcm-capture'))return {PcmCapture:Pcm}; return name.includes('config') ? { MEETING_SOCKET_URL: 'ws://localhost' } : { isTimelineSnapshot: message => message.type === 'timeline_snapshot' }; },
+    defineUnlistedScript: callback => callback(), queueMicrotask, Date: Clock, DOMException, Error, WebSocket: Socket, AudioContext: Context,
     navigator: { mediaDevices: { async getUserMedia(options) {
       if (options.audio.mandatory) { const selected = ++tabRequests === 1 ? tab : stream(); acquiredTabs.push(selected); return selected; }
       if (++micRequests === 1) {
@@ -87,17 +81,30 @@ function harness({ failInitialName, failReplacementName, permissionState = 'prom
     setTimeout(callback, delay) { timeouts.set(++timer, { callback, delay }); return timer; }, clearTimeout(id) { timeouts.delete(id); },
     setInterval(callback, delay) { intervals.set(++timer, { callback, delay }); return timer; }, clearInterval(id) { intervals.delete(id); },
   });
-  return { messages, sockets, recorders, contexts, microphone, replacement, intervals, acquiredMicrophones, acquiredTabs, pcmCaptures,
+  return { messages, sockets, contexts, microphone, replacement, intervals, acquiredMicrophones, acquiredTabs, pcmCaptures,
     get micRequests() { return micRequests; },
     resolveReplacement: () => resolveReplacement(replacement),
     resolveFirstClose: () => resolveFirstClose(),
     grantMicrophone(url = 'chrome-extension://test/mic-permission.html') { listener({ type: 'MIC_PERMISSION_RESULT', granted: true }, { tab: { id: 2 }, url }, () => {}); },
-    send: async message => { const result = await new Promise(resolve => listener(message, {}, resolve)); if (message.type === 'START_OFFSCREEN' && result.ok) { sockets.at(-1).onopen(); await new Promise(resolve => setImmediate(resolve)); } return result; },
-    window() { const [id, { callback }] = [...timeouts.entries()].find(([, task]) => task.delay === 3000); timeouts.delete(id); callback(); },
+    send: async message => {
+      let finished=false;
+      const response=new Promise(resolve => listener(message, {}, value=>{finished=true;resolve(value);}));
+      if (message.type === 'STOP_OFFSCREEN' && autoEnd) {
+        for(let i=0;i<1000&&!finished;i++) {
+          await new Promise(resolve=>setImmediate(resolve)); clock.now+=100;
+          for(const task of [...intervals.values()])if(task.delay===100)task.callback();
+        }
+      }
+      const result=await response;
+      if(message.type==='START_OFFSCREEN'&&result.ok) { sockets.at(-1).onopen(); await new Promise(resolve=>setImmediate(resolve)); }
+      return result;
+    },
+    window() { clock.now+=200; pcmCaptures.at(-1).emit(); },
+    pump() {clock.now+=100; for(const task of [...intervals.values()])if(task.delay===100)task.callback();},
     renew() { const [id, { callback }] = [...timeouts.entries()].find(([, task]) => task.delay > 10000); timeouts.delete(id); callback(); },
     health() { for (const {callback, delay} of intervals.values()) if (delay !== 15000) callback(); },
     heartbeat() { for (const {callback, delay} of intervals.values()) if (delay === 15000) callback(); },
-    async reconnect() { const [id, {callback}] = [...timeouts.entries()].find(([, task]) => task.delay >= 1000 && task.delay < 2000); timeouts.delete(id); callback(); await new Promise(resolve => setImmediate(resolve)); sockets.at(-1).onopen(); await new Promise(resolve => setImmediate(resolve)); },
+    async reconnect() { const [id, {callback}] = [...timeouts.entries()].find(([, task]) => task.delay >= 1000 && task.delay < 2000); timeouts.delete(id); callback(); await new Promise(resolve => setImmediate(resolve)); sockets.at(-1).onopen(); await new Promise(resolve => setImmediate(resolve)); clock.now+=100;for(const task of [...intervals.values()])if(task.delay===100)task.callback(); },
     timeout(delay) { const [id, task] = [...timeouts.entries()].find(([, task]) => task.delay === delay); timeouts.delete(id); task.callback(); },
     tab,
     clock,
@@ -105,14 +112,14 @@ function harness({ failInitialName, failReplacementName, permissionState = 'prom
   };
 }
 
-test('capture keeps sending audio windows after a suggestion for more than a minute', async () => {
+test('capture keeps sending audio frames after a suggestion for more than a minute', async () => {
   const h = harness();
   assert.equal((await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' })).ok, true);
   const socket = h.sockets[0];
   socket.onmessage({ data: JSON.stringify({ type: 'timeline_snapshot', items: [{ kind: 'task_suggestion' }] }) });
   for (let i = 0; i < 25; i++) h.window();
   assert.equal(socket.sent.length, 25);
-  assert.equal(h.recorders[0].state, 'recording');
+  assert.equal(h.pcmCaptures.length, 1);
   await h.send({ type: 'STOP_OFFSCREEN' });
   assert.equal(h.intervals.size, 0);
 });
@@ -127,7 +134,7 @@ test('capture resumes a suspended mixer and replaces a disconnected microphone',
   h.health();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.replacement.getTracks()[0].readyState, 'live');
-  assert.equal(h.recorders[0].state, 'recording');
+  assert.equal(h.pcmCaptures.length, 1);
   h.window();
   assert.equal(h.sockets[0].sent.length, 1);
   await h.send({ type: 'STOP_OFFSCREEN' });
@@ -181,7 +188,7 @@ test('failed muted-track replacement keeps the original input connected so it ca
   track.muted = false;
   h.health();
   assert.equal(h.messages.at(-1).state.audioWarning, undefined);
-  assert.equal(h.recorders[0].state, 'recording');
+  assert.equal(h.pcmCaptures.length, 1);
   await h.send({ type: 'STOP_OFFSCREEN' });
 });
 
@@ -203,7 +210,7 @@ test('failed microphone recovery keeps the websocket and Meet capture alive', as
   await new Promise(resolve => setImmediate(resolve));
 
   assert.equal(socket.readyState, 1);
-  assert.equal(h.recorders[0].state, 'recording');
+  assert.equal(h.pcmCaptures.length, 1);
   assert.equal(h.messages.at(-1).state.captureStatus, undefined);
   assert.match(h.messages.at(-1).state.audioWarning, /still reconnecting/);
 
@@ -228,7 +235,7 @@ test('a transient automatic NotAllowedError does not revoke remembered microphon
 test('explicit denial waits for a trusted fresh grant and recovers without replacing capture resources', async () => {
   const h = harness({ failReplacementName: 'NotAllowedError', permissionState: 'denied' });
   await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
-  const socket = h.sockets[0], recorder = h.recorders[0], context = h.contexts[0];
+  const socket = h.sockets[0], encoder = h.pcmCaptures[0], context = h.contexts[0];
   h.microphone.getTracks()[0].readyState = 'ended';
   h.health();
   await new Promise(resolve => setImmediate(resolve));
@@ -248,7 +255,7 @@ test('explicit denial waits for a trusted fresh grant and recovers without repla
   assert.equal(h.micRequests, 3);
   assert.equal(h.messages.at(-1).state.audioWarning, undefined);
   assert.deepEqual(h.sockets, [socket]);
-  assert.deepEqual(h.recorders, [recorder]);
+  assert.deepEqual(h.pcmCaptures, [encoder]);
   assert.deepEqual(h.contexts, [context]);
   assert.equal(h.acquiredMicrophones.at(-1).getTracks()[0].readyState, 'live');
   h.window();
@@ -318,20 +325,6 @@ test('late cleanup from the previous capture cannot erase a restarted microphone
   assert.equal(activeMicrophone.getTracks()[0].readyState, 'ended');
 });
 
-test('a late recorder stop event cannot cancel the next capture recording window', async () => {
-  const h = harness({ deferFirstRecorderStop: true });
-  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'first' });
-  const stopping = h.send({ type: 'STOP_OFFSCREEN' });
-  await new Promise(resolve => setImmediate(resolve));
-  await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'second' });
-  h.recorders[0].finishStop();
-  await stopping;
-  h.window();
-  assert.equal(h.sockets[1].sent.length, 1);
-  assert.equal(h.recorders[1].state, 'recording');
-  await h.send({ type: 'STOP_OFFSCREEN' });
-});
-
 test('repeated capture sessions release each input while preserving the next session', async () => {
   const h = harness();
   for (let i = 0; i < 8; i++) {
@@ -349,20 +342,20 @@ test('repeated capture sessions release each input while preserving the next ses
 });
 
 
-test('authorization renewal preserves the same microphone, mixer, recorder and socket', async () => {
+test('authorization renewal preserves the same microphone, mixer, encoder and socket', async () => {
   const h = harness();
   await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
-  const socket = h.sockets[0], mixer = h.contexts[0], recorder = h.recorders[0];
+  const socket = h.sockets[0], mixer = h.contexts[0], encoder = h.pcmCaptures[0];
   h.window();
   h.renew();
   await new Promise(resolve => setImmediate(resolve));
   h.window();
   assert.equal(h.sockets.length, 1);
   assert.equal(h.contexts.length, 1);
-  assert.equal(h.recorders.length, 1);
+  assert.equal(h.pcmCaptures.length, 1);
   assert.equal(h.sockets[0], socket);
   assert.equal(h.contexts[0], mixer);
-  assert.equal(h.recorders[0], recorder);
+  assert.equal(h.pcmCaptures[0], encoder);
   assert.equal(h.microphone.getTracks()[0].readyState, 'live');
   assert.equal(socket.sent.length, 2);
   await h.send({ type: 'STOP_OFFSCREEN' });
@@ -372,7 +365,7 @@ test('authorization renewal preserves the same microphone, mixer, recorder and s
 test('server-relative lifetime avoids renewal loops when the device clock differs', async () => {
   const h = harness();
   await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'session' });
-  h.sockets[0].onmessage({ data: JSON.stringify({ type: 'auth_ready', expiresAt: 1, expiresIn: 900 }) });
+  h.sockets[0].onmessage({ data: JSON.stringify({ type: 'auth_ready', expiresAt: 1, expiresIn: 900, ack: 0, audioFormat: 'pcm_s16le_16000_v2' }) });
   h.renew(); await new Promise(resolve => setImmediate(resolve)); h.window();
   assert.equal(h.sockets[0].readyState, 1);
   assert.equal(h.microphone.getTracks()[0].readyState, 'live');
@@ -380,7 +373,7 @@ test('server-relative lifetime avoids renewal loops when the device clock differ
   await h.send({ type: 'STOP_OFFSCREEN' });
 });
 
-test('server restart reconnects without reopening mic or recreating recorder and replays unacknowledged audio', async () => {
+test('server restart reconnects without reopening mic or recreating encoder and replays unacknowledged audio', async () => {
   const h = harness({ acknowledge: false });
   await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'meeting' });
   h.window();
@@ -389,7 +382,7 @@ test('server restart reconnects without reopening mic or recreating recorder and
   h.window();
   assert.equal(h.microphone.getTracks()[0].readyState, 'live');
   assert.equal(h.tab.getTracks()[0].readyState, 'live');
-  assert.equal(h.recorders.length, 1);
+  assert.equal(h.pcmCaptures.length, 1);
   assert.equal(h.contexts.length, 1);
   await h.reconnect();
   assert.equal(h.sockets.length, 2);
@@ -438,7 +431,7 @@ test('expired authentication stops capture instead of reconnecting', async () =>
 test('audio queue stays bounded when server never acknowledges', async () => {
   const h = harness({ acknowledge: false });
   await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'meeting' });
-  for (let i = 0; i < 21; i++) h.window();
+  for (let i = 0; i < 451; i++) h.window();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.microphone.getTracks()[0].readyState, 'ended');
   assert.match(h.messages.find(message => message.state?.error?.includes('MI-CON-005')).state.error, /unavailable for too long/);
@@ -449,7 +442,7 @@ test('application heartbeat sends ping without touching media', async () => {
   await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'meeting' });
   h.heartbeat();
   assert.equal(h.sockets[0].controls.at(-1).type, 'ping');
-  assert.equal(h.recorders.length, 1);
+  assert.equal(h.pcmCaptures.length, 1);
   assert.equal(h.contexts[0].state, 'running');
   await h.send({ type: 'STOP_OFFSCREEN' });
 });
@@ -495,7 +488,7 @@ test('MOM sends room identity separately and drains the final blob before finish
   assert.equal((await stopped).warning, undefined);
   assert.equal(socket.sent.length, 2);
   assert.equal(socket.controls.at(-1).type, 'finish');
-  assert.equal(socket.controls.at(-1).lastSequence, 2);
+  assert.equal(socket.controls.at(-1).lastSequence, 3250);
   assert.equal(socket.readyState, 3);
   assert.equal(h.messages.filter(m => m.type === 'MOM_UPDATE').at(-1).meeting.state, 'ready');
   assert.equal(h.timeouts.size, 0);
@@ -531,7 +524,7 @@ test('MOM drain timeout releases hardware immediately and reports incomplete tai
   assert.equal(h.microphone.getTracks()[0].readyState, 'ended');
   assert.equal(h.tab.getTracks()[0].readyState, 'ended');
   await new Promise(resolve => setImmediate(resolve));
-  h.timeout(35000);
+  h.timeout(70000);
   assert.match((await stopped).warning, /MI-MOM-003/);
   assert.equal(h.sockets[0].readyState, 3);
   assert.equal(h.intervals.size, 0);
@@ -543,36 +536,35 @@ test('late MOM drain completion cannot close the microphone or socket of a new c
   const stopped = h.send({ type: 'STOP_OFFSCREEN' });
   await new Promise(resolve => setImmediate(resolve));
   await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'second', roomId: 'abc-defg-hij', userId: 'user', mode: 'both' });
-  h.sockets[0].onmessage({ data: JSON.stringify({ type: 'meeting_segment_ended', ack: 1, minutesFinalizing: false }) });
+  h.sockets[0].onmessage({ data: JSON.stringify({ type: 'meeting_segment_ended', ack: 50, minutesFinalizing: false }) });
   await stopped;
   assert.equal(h.acquiredMicrophones.at(-1).getTracks()[0].readyState, 'live');
   assert.equal(h.sockets[1].readyState, 1);
   const secondStop = h.send({ type: 'STOP_OFFSCREEN' });
   await new Promise(resolve => setImmediate(resolve));
-  h.timeout(35000); await secondStop;
+  h.timeout(70000); await secondStop;
 });
 
 test('live-only stop never sends a MOM finalization or persists minutes metadata', async () => {
   const h = harness();
   await h.send({ type: 'START_OFFSCREEN', streamId: 'tab', captureSessionId: 'capture', roomId: 'abc-defg-hij', userId: 'user' });
   await h.send({ type: 'STOP_OFFSCREEN', finishMinutes: true });
-  assert.equal(h.sockets[0].controls.some(m => ['end', 'finish'].includes(m.type)), false);
+  assert.equal(h.sockets[0].controls.at(-1).type, 'end');
   assert.equal(h.messages.some(m => m.type === 'MOM_UPDATE'), false);
 });
 
 test('streaming capture keeps one encoder and socket for continuous PCM and drains on stop', async()=>{
   const h=harness({streaming:true});
   await h.send({type:'START_OFFSCREEN',streamId:'tab',captureSessionId:'streaming-session'});
-  assert.equal(h.recorders.length,0);
   assert.equal(h.pcmCaptures.length,1);
-  assert.equal(h.sockets[0].controls[0].audioFormat,'pcm_s16le_16000');
-  for(let n=0;n<100;n++)h.pcmCaptures[0].emit();
+  assert.equal(h.sockets[0].controls[0].audioFormat,'pcm_s16le_16000_v2');
+  for(let n=0;n<100;n++)h.window();
   assert.equal(h.sockets.length,1);
   assert.equal(h.sockets[0].sent.length,100);
   const result=await h.send({type:'STOP_OFFSCREEN'});
   assert.equal(result.ok,true);
   assert.equal(h.sockets[0].sent.length,101,'flush final sub-frame');
-  assert.ok(h.sockets[0].controls.some(c=>c.type==='end'&&c.lastSequence===101));
+  assert.ok(h.sockets[0].controls.some(c=>c.type==='end'&&c.lastSequence===320050));
   assert.equal(h.microphone.getTracks()[0].readyState,'ended');
   assert.equal(h.intervals.size,0);
 });
@@ -590,15 +582,14 @@ test('streaming stops hardware immediately while final PCM is being flushed',asy
   assert.equal(h.contexts[0].state,'closed');
 });
 
-test('streaming connection loss releases the mic and never silently replays uncertain audio',async()=>{
-  const h=harness({streaming:true});
+test('repeated connection flaps stop within the paid recovery budget',async()=>{
+  const h=harness();
   await h.send({type:'START_OFFSCREEN',streamId:'tab',captureSessionId:'streaming-session'});
-  h.sockets[0].readyState=3;
-  h.sockets[0].onclose({code:1006});
+  for(let n=0;n<5;n++) { h.sockets.at(-1).onclose({code:1006});await h.reconnect(); }
+  h.sockets.at(-1).onclose({code:1006});
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(h.microphone.getTracks()[0].readyState,'ended');
   assert.equal(h.tab.getTracks()[0].readyState,'ended');
-  assert.equal(h.sockets.length,1);
-  assert.ok(h.messages.some(m=>m.state?.error?.includes('MI-STT-001')));
+  assert.ok(h.messages.some(m=>m.state?.error?.includes('MI-CON-005')));
   assert.equal(h.intervals.size,0);
 });

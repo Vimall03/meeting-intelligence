@@ -1,0 +1,74 @@
+{
+  "date": "2026-10-21",
+  "version": "0.1.13",
+  "branch": "streaming-release",
+  "production_deployed": false,
+  "checks": {
+    "backend_tests": 187,
+    "linux_locked_runtime_tests": 187,
+    "extension_tests": 101,
+    "extension_typecheck": "passed",
+    "production_package": "passed",
+    "infra_typescript_tests": 29,
+    "infra_python_tests": 37,
+    "infra_typecheck_and_synth": "passed",
+    "runtime_source_hashes_matched": 27,
+    "runtime_liveness_and_shutdown": "passed",
+    "changed_source_and_package_secret_scan": "passed"
+  },
+  "container": {
+    "platform": "linux/amd64",
+    "baseline_docker_reported_bytes": 279858572,
+    "streaming_docker_reported_bytes": 86028745,
+    "reduction_percent": 69.26,
+    "isolated_idle_memory_mib": 77.11,
+    "runtime_contains_tests": false,
+    "runtime_contains_ffmpeg_or_numpy": false,
+    "runtime_contains_worker_only_modules": false
+  },
+  "package": {
+    "filename": "meeting-intelligence-0.1.13.zip",
+    "bytes": 526161,
+    "sha256": "84c5a25da1562a707d3f9c653c0d4107734d2ea8c2d8d93380b9d3e138a3fc82",
+    "extension_id": "ifednlgahhhflcbaojjhfphiockifodk"
+  },
+  "browser_aws_check": {
+    "result": {
+      "ok": true
+    },
+    "partials": 21,
+    "finals": [
+      "Please send the revised launch plan to Maya before Friday afternoon.",
+      "Please send the revised launch plan to Maya before Friday afternoon. The design is approved, but the payment tests still need an owner.",
+      "Please send the revised launch plan to Maya before Friday afternoon. The design is approved, but the payment tests still need an owner. We will review the results together at the next meeting.",
+      "Please send the revised launch plan to Maya before Friday afternoon. The design is approved, but the payment tests still need an owner. We will review the results together at the next meeting."
+    ],
+    "ack": 259584,
+    "sockets": 2,
+    "tracksEnded": true,
+    "errors": [],
+    "recoveries": 2,
+    "submitted_audio_seconds": 20.424,
+    "recognition_connections": 2,
+    "estimated_transcription_usd": 0.0020424,
+    "passed": true
+  },
+  "noise_aws_check": {
+    "input_seconds": 48.12825,
+    "duration_s": 48.187240125000244,
+    "final_text": "The authentication callback fails when the session token expires. An exponential back off and an idempotencyT before retrying the request. Keep the release blocked until the integration tests pass",
+    "partials": 32,
+    "drained_boundaries": [
+      46.6,
+      48.12825
+    ],
+    "estimated_transcription_usd": 0.004812825000000001,
+    "passed": true
+  },
+  "remaining_release_checks": [
+    "Real Google Meet call",
+    "Two-person Zoom browser call; Zoom remains preview",
+    "Production relay/concurrent-load verification",
+    "Compatible server/extension rollout; old installed extensions require existing server"
+  ]
+}

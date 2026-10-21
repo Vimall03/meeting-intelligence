@@ -11,3 +11,8 @@
 app/**/__pycache__/
 **/.env*
 **/.data/
+
+# Recap generation runs in its own worker package, not the meeting server.
+app/mom/worker.py
+app/mom/processing.py
+app/mom/email_template.py

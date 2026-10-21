@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 
+from streaming_fakes import transcription_stream, DefaultStream
 from fastapi import WebSocketDisconnect
 from app.core.auth import Principal, issue_ticket
 from app.services.meeting_sessions import MeetingSessions, MeetingCheckpoints, MeetingBusy, MeetingConnections
@@ -23,13 +24,13 @@ class RecoverySocket:
         self.frames = list(frames)
         self.sent = []
         self.finished = asyncio.Event()
-        self.end_ack, self.end_revision, self.end_llm = end_ack, end_revision, end_llm
+        self.end_ack, self.end_revision, self.end_llm = (end_ack * 3200 if end_ack else end_ack), end_revision, end_llm
 
     async def accept(self): pass
 
     async def receive_text(self):
         principal = Principal('A', 'family-A', int(time.time()) + 900)
-        return json.dumps({'ticket': await issue_ticket(principal, self.app.state.users), 'meetingId': 'meeting-1'})
+        return json.dumps({'ticket': await issue_ticket(principal, self.app.state.users), 'meetingId': 'meeting-1', 'audioFormat': 'pcm_s16le_16000_v2'})
 
     async def receive(self):
         if self.frames:
@@ -50,8 +51,8 @@ class RecoverySocket:
 
 
 def window(sequence, text):
-    return [{'type': 'websocket.receive', 'text': json.dumps({'type': 'audio', 'sequence': sequence})},
-            {'type': 'websocket.receive', 'bytes': text.encode()}]
+    return [{'type': 'websocket.receive', 'text': json.dumps({'type': 'audio', 'startSample': (sequence-1)*3200})},
+            {'type': 'websocket.receive', 'bytes': text.encode().ljust(6400, b' ')}]
 
 
 class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -173,7 +174,7 @@ class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
             completed.append(time.perf_counter())
             return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': 'complete words'}]}
         ws = TimedSocket(self.db, window(1, 'audio'), end_ack=1)
-        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''), patch.object(route, 'transcribe_snapshot', transcribe):
+        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''), patch.object(route, 'AmazonStreamingTranscription', transcription_stream(transcribe)):
             await asyncio.wait_for(route.meeting_stream(ws), 2)
         self.assertLess(accepted[0] - completed[0], .15)
 
@@ -211,11 +212,11 @@ class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.db.test_drive = FakeDrive()
         calls = []
         async def transcribe(audio):
-            calls.append(audio)
-            return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': audio.decode()}]}
+            calls.append(audio.rstrip())
+            return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': audio.decode().strip()}]}
         first = RecoverySocket(self.db, window(1, 'first words'), end_ack=1)
         second = RecoverySocket(self.db, window(1, 'first words') + window(2, 'second words'), end_ack=2)
-        with self.assertLogs('meeting_intelligence', level='INFO') as captured, patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''), patch.object(route, 'transcribe_snapshot', transcribe):
+        with self.assertLogs('meeting_intelligence', level='INFO') as captured, patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''), patch.object(route, 'AmazonStreamingTranscription', transcription_stream(transcribe)):
             await asyncio.wait_for(route.meeting_stream(first), 3)
             await asyncio.wait_for(route.meeting_stream(second), 3)
         connected = [record.metadata for record in captured.records if record.getMessage() == 'meeting.connected']
@@ -224,12 +225,12 @@ class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({entry['user_id'] for entry in connected}, {'A'})
         self.assertEqual(len({entry['connection_id'] for entry in connected}), 2)
         self.assertEqual(calls, [b'first words', b'second words'])
-        self.assertEqual(next(m for m in second.sent if m['type'] == 'auth_ready')['ack'], 1)
+        self.assertEqual(next(m for m in second.sent if m['type'] == 'auth_ready')['ack'], 3200)
         one = next(m for m in first.sent if m['type'] == 'timeline_snapshot')
         two = next(m for m in second.sent if m['type'] == 'timeline_snapshot')
         self.assertEqual(one['session_id'], two['session_id'])
         saved = await MeetingSessions(self.db, self.a, 'meeting-1').acquire()
-        self.assertEqual(saved['ack'], 2)
+        self.assertEqual(saved['ack'], 6400)
         self.assertEqual([s['text'] for s in saved['context']['segments']], ['first words', 'second words'])
 
     async def test_search_interrupted_by_disconnect_resumes_on_next_process(self):
@@ -240,8 +241,8 @@ class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
         first = RecoverySocket(self.db, window(1, 'Please send the launch plan to Maya.'), end_llm=True)
         second = RecoverySocket(self.db, end_revision=2)
         async def transcribe(audio):
-            return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': audio.decode()}]}
-        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', 'test'), patch.object(route, 'JevService', FakeJev), patch.object(route, 'LlmService', FakeLlm), patch.object(route, 'transcribe_snapshot', transcribe):
+            return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': audio.decode().strip()}]}
+        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', 'test'), patch.object(route, 'JevService', FakeJev), patch.object(route, 'LlmService', FakeLlm), patch.object(route, 'AmazonStreamingTranscription', transcription_stream(transcribe)):
             await asyncio.wait_for(route.meeting_stream(first), 4)
             self.db.test_drive = FakeDrive()
             await asyncio.wait_for(route.meeting_stream(second), 4)
@@ -276,14 +277,14 @@ class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
         async def transcribe(audio):
             return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': 'retained words'}]}
 
-        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''), patch.object(route, 'transcribe_snapshot', transcribe):
+        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''), patch.object(route, 'AmazonStreamingTranscription', transcription_stream(transcribe)):
             server, task, listener, url = await start_server()
             try:
                 async with websockets.connect(url) as client:
                     ticket = await issue_ticket(self.a, self.db)
-                    await client.send(json.dumps({'ticket': ticket, 'meetingId': 'meeting-live'}))
+                    await client.send(json.dumps({'ticket': ticket, 'meetingId': 'meeting-live', 'audioFormat': 'pcm_s16le_16000_v2'}))
                     while json.loads(await asyncio.wait_for(client.recv(), 2))['type'] != 'auth_ready': pass
-                    await client.send(json.dumps({'type': 'audio', 'sequence': 1})); await client.send(b'audio')
+                    await client.send(json.dumps({'type': 'audio', 'startSample': 0})); await client.send(bytes(6400))
                     while json.loads(await asyncio.wait_for(client.recv(), 2))['type'] != 'audio_ack': pass
                     server.should_exit = True
                     with self.assertRaises(websockets.exceptions.ConnectionClosed) as closed:
@@ -298,9 +299,9 @@ class MeetingRecoveryTests(unittest.IsolatedAsyncioTestCase):
             try:
                 async with websockets.connect(url) as client:
                     ticket = await issue_ticket(self.a, self.db)
-                    await client.send(json.dumps({'ticket': ticket, 'meetingId': 'meeting-live', 'lastAck': 1}))
+                    await client.send(json.dumps({'ticket': ticket, 'meetingId': 'meeting-live', 'lastAck': 3200, 'audioFormat': 'pcm_s16le_16000_v2'}))
                     ready = json.loads(await asyncio.wait_for(client.recv(), 2))
-                    self.assertEqual((ready['type'], ready['ack']), ('auth_ready', 1))
+                    self.assertEqual((ready['type'], ready['ack']), ('auth_ready', 3200))
             finally:
                 server.should_exit = True
                 await asyncio.wait_for(task, 5)

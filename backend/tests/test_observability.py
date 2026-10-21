@@ -14,7 +14,6 @@ from app.core.observability import (
     log_context, log_event, observe_operation, provider_request,
 )
 from app.main import safe_failure
-from app.services.openrouter_stt_service import OpenRouterTranscriptionService
 from app.services.user_store import CredentialStore
 from test_auth_integration import MemoryStore
 
@@ -159,23 +158,6 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(all(r['user_id'] == 'A' for r in entries(captured)))
         self.assertNotIn('private-', json.dumps(entries(captured)))
-
-    async def test_sync_transcription_diagnostics_follow_verified_identity_without_transcript(self):
-        import numpy as np
-        def provider(request):
-            return httpx.Response(200, json={'text': 'confidential meeting speech'})
-        service = OpenRouterTranscriptionService('private-api-key', transport=httpx.MockTransport(provider))
-        with patch('app.services.openrouter_stt_service.load_audio', return_value=np.zeros(16000, dtype=np.float32)), \
-             self.assertLogs('meeting_intelligence', level='INFO') as captured, \
-             log_context(user_id='A', meeting_id='meeting', request_id='request', sequence=2):
-            result = await run_in_threadpool(service.transcribe, 'private-audio-path')
-        self.assertEqual(result['segments'][0]['text'], 'confidential meeting speech')
-        rows = entries(captured)
-        self.assertTrue(all(r['user_id'] == 'A' and r['sequence'] == 2 for r in rows))
-        self.assertTrue(any(r['event'] == 'audio.decode.completed' for r in rows))
-        self.assertTrue(any(r['event'] == 'provider.request.completed' and r['status_code'] == 200 for r in rows))
-        for secret in ('confidential', 'private-api-key', 'private-audio-path'):
-            self.assertNotIn(secret, json.dumps(rows))
 
     def test_aws_error_uses_code_not_description(self):
         error = RuntimeError('private token')

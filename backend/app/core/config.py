@@ -20,18 +20,10 @@ class Settings(BaseSettings):
     extension_origin: str = ""
     
     meeting_context_window_seconds: float = 45.0
-    streaming_stt_enabled: bool = False
     streaming_stt_language: str = 'en-US'
     meeting_background_window_seconds: float = Field(default=180.0, gt=0)
     meeting_context_turn_gap_seconds: float = 12.0
     openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
-    openrouter_stt_model: str = Field(
-        default="openai/gpt-transcribe", validation_alias="OPENROUTER_STT_MODEL"
-    )
-    openrouter_stt_url: str = Field(
-        default="https://openrouter.ai/api/v1/audio/transcriptions",
-        validation_alias="OPENROUTER_STT_URL",
-    )
     jev_model: str = "typesafe/jev-1.13"
     jev_decisions_url: str = "https://openrouter.ai/api/alpha/decisions"
     jev_search_threshold: float = 0.75

@@ -246,12 +246,23 @@ class Repository:
             if getattr(exc, 'response', {}).get('Error', {}).get('Code') in ('NoSuchKey', '404'): return None
             raise
 
-    def detach(self, attachment, *, finish=False, incomplete=False):
+    def detach(self, attachment, *, finish=False, incomplete=False, capture=None):
         row = self.get(attachment['pk'])
         if not row or row['state'] != 'active' or row.get('owner') != attachment['owner']: return
         now = int(self.clock())
         deadline = now if finish else now + self.grace if row.get('leaseUntil', 0) > now else row['finalizeAfter']
-        row = self.replace(row, owner=None, leaseUntil=None, incomplete=bool(incomplete or row.get('incomplete')), state='ready' if finish else 'active',
+        recovery = {}
+        if capture is not None:
+            if capture not in row['captures']: raise Conflict()
+            missing = set(row.get('incompleteCaptures', []))
+            legacy = row.get('legacyIncomplete', bool(row.get('incomplete') and 'incompleteCaptures' not in row))
+            if incomplete: missing.add(capture)
+            else: missing.discard(capture)
+            recovery = {'incompleteCaptures': sorted(missing), 'legacyIncomplete': legacy}
+            incomplete = bool(missing or legacy)
+        else:
+            incomplete = bool(incomplete or row.get('incomplete'))
+        row = self.replace(row, owner=None, leaseUntil=None, incomplete=incomplete, **recovery, state='ready' if finish else 'active',
             finalizeAfter=deadline, dueAt=min(deadline, row['purgeAt']))
         if finish:
             try: self.enqueue(row)

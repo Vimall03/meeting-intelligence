@@ -1,18 +1,18 @@
 [project]
 name = "ai-meetings"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "Live assistance and optional recaps for online meetings"
 requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.40.0",
     "PyJWT[crypto]>=2.10.1",
     "cryptography>=45.0.0",
-    "fastapi[standard]>=0.141.1",
-    "numpy>=2.0.0",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.38.0",
+    "uvloop==0.22.1; sys_platform != 'win32'",
+    "httptools==0.8.0",
     "httpx>=0.28.1",
     "pydantic-settings>=2.15.0",
-    "python-dotenv>=1.2.3",
     "websockets>=17.1",
-    "amazon-transcribe>=0.6.4",
+    "amazon-transcribe==0.6.4",
 ]

@@ -1,94 +1,133 @@
 import asyncio
-from types import SimpleNamespace as NS
 import unittest
-
+from types import SimpleNamespace as NS
 from app.services.streaming_stt import AmazonStreamingTranscription, StreamingTranscriptionError
-from stt_compare import alignment, tokens, score, summarise
 
 
-class Input:
-    def __init__(self): self.audio=[]; self.ended=0
-    async def send_audio_event(self, *, audio_chunk): self.audio.append(audio_chunk)
-    async def end_stream(self): self.ended+=1
+def result(id='a', text='Ship only after approval', partial=False, start=0, end=.2):
+    return NS(result_id=id, alternatives=[NS(transcript=text)], start_time=start, end_time=end, is_partial=partial)
 
 
-class Output:
-    def __init__(self, events): self.events=events
-    async def __aiter__(self):
-        for event in self.events: yield NS(transcript=NS(results=[event]))
+class Provider:
+    def __init__(self, final=None, fail_send=False):
+        self.audio=[];self.ended=0;self.queue=asyncio.Queue();self.final=final;self.fail_send=fail_send
+        self.input_stream=self;self.output_stream=self
+    async def send_audio_event(self, *, audio_chunk):
+        if self.fail_send:raise RuntimeError('private provider token')
+        self.audio.append(audio_chunk)
+    async def end_stream(self):
+        self.ended+=1
+        if self.final:await self.queue.put(self.final)
+        await self.queue.put(None)
+    def __aiter__(self):return self
+    async def __anext__(self):
+        event=await self.queue.get()
+        if event is None:raise StopAsyncIteration
+        return NS(transcript=NS(results=[event]))
 
 
-def event(id='a',text='Ship only after approval',partial=False):
-    return NS(result_id=id, alternatives=[NS(transcript=text)], start_time=0,end_time=1,is_partial=partial)
+class Client:
+    def __init__(self,factory=Provider):self.calls=[];self.streams=[];self.factory=factory
+    async def start_stream_transcription(self,**kwargs):
+        self.calls.append(kwargs);stream=self.factory();self.streams.append(stream);return stream
 
 
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
-    async def make(self,events=()):
-        input=Input(); output=Output(events); arguments=[]
-        class Client:
-            async def start_stream_transcription(self,**kwargs):
-                arguments.append(kwargs)
-                return NS(input_stream=input,output_stream=output)
-        session=await AmazonStreamingTranscription(client=Client()).start()
-        return session,input,arguments
-
-    async def test_one_connection_emits_replaceable_partials_and_each_final_once(self):
-        session,input,args=await self.make([event(text='Ship',partial=True),event(),event(),event('b','Do not ship')])
+    async def test_partials_duplicate_finals_and_trailing_silence_barrier(self):
+        client=Client();session=await AmazonStreamingTranscription(client=client).start();stream=client.streams[0]
         await session.send(bytes(6400));await session.send(bytes(6400))
+        for event in [result(text='Ship',partial=True),result(),result()]:await stream.queue.put(event)
+        await session.finish()
         updates=[e async for e in session.updates()]
-        self.assertEqual([e.final for e in updates],[False,True,True])
-        self.assertEqual([e.text for e in updates if e.final],['Ship only after approval','Do not ship'])
-        self.assertEqual(len(args),1);self.assertEqual(args[0]['media_encoding'],'pcm')
-        self.assertEqual(session.audio_seconds,.4)
-        await session.finish();await session.finish()
-        self.assertEqual(input.ended,1)
+        self.assertEqual([(e.text,e.final) for e in updates],[('Ship',False),('Ship only after approval',True),('',True)])
+        self.assertEqual(updates[-1].end,.4)
+        self.assertEqual(len(client.calls),1);self.assertEqual(client.calls[0]['media_encoding'],'pcm')
+        await session.finish();await session.abort();self.assertEqual(stream.ended,1)
         with self.assertRaises(StreamingTranscriptionError):await session.send(bytes(2))
 
-    async def test_invalid_frames_are_rejected_before_provider_submission(self):
-        session,input,_=await self.make()
-        for value in [b'',b'x',bytes(6402)]:
-            with self.assertRaises(StreamingTranscriptionError):await session.send(value)
-        self.assertEqual(input.audio,[])
-        await session.finish()
+    async def test_invalid_frames_never_reach_provider(self):
+        client=Client();session=await AmazonStreamingTranscription(client=client).start()
+        for pcm in [b'',b'x',bytes(6402)]:
+            with self.assertRaises(StreamingTranscriptionError):await session.send(pcm)
+        self.assertEqual(client.streams[0].audio,[])
+        await session.abort();self.assertTrue(session._reader.done())
 
-    async def test_provider_exception_is_replaced_by_stable_support_code(self):
-        class Client:
+    async def test_provider_errors_are_safe_and_reader_is_released(self):
+        client=Client(lambda:Provider(fail_send=True));session=await AmazonStreamingTranscription(client=client).start()
+        with self.assertRaisesRegex(StreamingTranscriptionError,'MI-STT-001'):await session.send(bytes(6400))
+        await session.abort();self.assertTrue(session._reader.done())
+        class BadClient:
             async def start_stream_transcription(self,**kwargs):raise RuntimeError('private token and URL')
-        with self.assertRaises(StreamingTranscriptionError) as error:
-            await AmazonStreamingTranscription(client=Client()).start()
-        self.assertEqual(str(error.exception),'MI-STT-001')
+        with self.assertRaisesRegex(StreamingTranscriptionError,'MI-STT-001'):await AmazonStreamingTranscription(client=BadClient()).start()
 
-    async def test_invalid_timestamps_do_not_reach_meeting_context(self):
-        bad=event();bad.end_time=-1
-        session,_,_=await self.make([bad])
-        with self.assertRaises(StreamingTranscriptionError):[e async for e in session.updates()]
-        await session.finish()
+    async def test_invalid_and_nonfinite_timestamps_fail_closed(self):
+        for start,end in [(0,-1),(float('nan'),1),(0,float('inf'))]:
+            client=Client();session=await AmazonStreamingTranscription(client=client).start()
+            await client.streams[0].queue.put(result(start=start,end=end))
+            with self.assertRaises(StreamingTranscriptionError):await anext(session.updates())
+            await session.abort()
 
+    async def test_unexpected_end_is_failure_not_successful_silence(self):
+        client=Client();session=await AmazonStreamingTranscription(client=client).start()
+        await client.streams[0].queue.put(None)
+        with self.assertRaises(StreamingTranscriptionError):await anext(session.updates())
+        await session.abort()
 
-class ComparisonTests(unittest.TestCase):
-    def test_wer_counts_omissions_and_hallucinations(self):
-        stats,_=alignment(tokens('do not ship until Friday'),tokens('do ship until Monday please'))
-        self.assertEqual(stats['deletions'],1)
-        self.assertEqual(stats['substitutions'],1)
-        self.assertEqual(stats['insertions'],1)
-        self.assertEqual(stats['wer'],.6)
+    async def test_stalled_noise_rotates_without_overlapping_or_losing_audio(self):
+        client=Client();session=await AmazonStreamingTranscription(client=client).start()
+        session.max_unfinalized_seconds=.4;frames=[bytes([i])*6400 for i in range(3)]
+        for frame in frames:await session.send(frame)
+        await session.finish();updates=[e async for e in session.updates()]
+        self.assertEqual(len(client.streams),2)
+        self.assertEqual(client.streams[0].audio,frames[:2]);self.assertEqual(client.streams[1].audio,frames[2:])
+        self.assertEqual([e.end for e in updates],[.4,.6])
+        self.assertEqual([s.ended for s in client.streams],[1,1]);await session.abort()
 
-    def test_number_formatting_is_normalized_but_negation_is_preserved(self):
-        self.assertEqual(tokens('14,000 dollars.'),tokens('fourteen thousand dollars'))
-        self.assertEqual(tokens('$14,000'),tokens('fourteen thousand dollars'))
-        self.assertEqual(tokens('$40,000.'),tokens('forty thousand dollars'))
-        self.assertEqual(tokens('November 21st'),tokens('November twenty first'))
-        self.assertEqual(tokens('Nov. 21'),tokens('November twenty first'))
-        self.assertNotEqual(tokens('do ship'),tokens('do not ship'))
+    async def test_regular_finals_preserve_one_context(self):
+        client=Client();session=await AmazonStreamingTranscription(client=client).start();session.max_unfinalized_seconds=.4
+        for i in range(6):
+            await session.send(bytes(6400))
+            await client.streams[0].queue.put(result(id=str(i),start=i*.2,end=(i+1)*.2))
+            self.assertTrue((await anext(session.updates())).final)
+        await session.finish();self.assertEqual(len(client.calls),1);await session.abort()
 
-    def test_latency_includes_capture_wait_and_reports_missing_endings(self):
-        clip={'utterances':[{'text':'send the plan','start':0,'end':1},
-            {'text':'hold the release','start':2,'end':3}]}
-        result=score(clip,[{'text':'send the plan','final':True,'received_s':4},
-            {'text':'hold the meeting','final':True,'received_s':6}])
-        self.assertEqual(result['final_utterance_lags_s'],[3])
-        self.assertEqual(result['latency_coverage'],1)
-        self.assertEqual(result['utterance_count'],2)
+    async def test_native_callback_future_survives_cancellation_and_connection_closes(self):
+        from concurrent.futures import Future
+        from amazon_transcribe.httpsession import AwsCrtHttpResponse
+        raw=AwsCrtHttpResponse();closed=[]
+        def close():
+            closed.append(True);future=Future();future.set_result(None);return future
+        raw._stream=NS(completion_future=Future(),connection=NS(close=close))
+        def factory():
+            provider=Provider();provider._raw_stream=raw;return provider
+        session=await AmazonStreamingTranscription(client=Client(factory)).start()
+        waiting=raw.get_chunk();waiting.cancel()
+        with self.assertRaises(asyncio.CancelledError):await waiting
+        self.assertFalse(raw._chunk_futures[0].cancelled())
+        raw._on_body(b'late provider callback')
+        await asyncio.sleep(0);await session.abort();self.assertEqual(closed,[True])
+
+    async def test_failed_drain_cannot_commit_trailing_audio(self):
+        client=Client();session=await AmazonStreamingTranscription(client=client).start()
+        await session.send(bytes(6400));await client.streams[0].queue.put(result(end=float('nan')))
+        with self.assertRaises(StreamingTranscriptionError):await anext(session.updates())
+        with self.assertRaises(StreamingTranscriptionError):await session.finish()
+        self.assertTrue(session._events.empty());await session.abort()
+
+    async def test_cancelled_start_closes_late_connection_without_cancelling_native_handshake(self):
+        from concurrent.futures import Future
+        gate=asyncio.Event();closed=[]
+        def close():
+            closed.append(True);future=Future();future.set_result(None);return future
+        provider=Provider();provider._raw_stream=NS(_stream=NS(connection=NS(close=close)))
+        class SlowClient:
+            async def start_stream_transcription(self,**kwargs):
+                await gate.wait();return provider
+        session=AmazonStreamingTranscription(client=SlowClient())
+        task=asyncio.create_task(session.start());await asyncio.sleep(0);task.cancel()
+        with self.assertRaises(asyncio.CancelledError):await task
+        gate.set();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.assertEqual(closed,[True])
 
 
 if __name__=='__main__':unittest.main()

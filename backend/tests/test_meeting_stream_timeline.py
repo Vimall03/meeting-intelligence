@@ -8,6 +8,7 @@ from app.core.auth import Principal, issue_ticket
 from test_auth_integration import MemoryStore
 import time, json
 
+from streaming_fakes import transcription_stream, DefaultStream
 from fastapi import WebSocketDisconnect
 
 from app.services.jev_service import JevDecision
@@ -27,9 +28,15 @@ class FakeWebSocket:
 
     async def receive_text(self):
         user = getattr(self, 'user', 'A')
-        return json.dumps({'ticket': await issue_ticket(Principal(user, 'family-' + user, int(time.time()) + 900), self.app.state.users)})
+        return json.dumps({'ticket': await issue_ticket(Principal(user, 'family-' + user, int(time.time()) + 900), self.app.state.users), 'meetingId': 'test-meeting', 'audioFormat': 'pcm_s16le_16000_v2'})
     async def receive(self):
-        return {'type': 'websocket.receive', 'bytes': await self.receive_bytes()}
+        if getattr(self, '_pending_pcm', None) is not None:
+            pcm, self._pending_pcm = self._pending_pcm, None
+            return {'type': 'websocket.receive', 'bytes': pcm}
+        self._pending_pcm = (await self.receive_bytes()).ljust(6400, b' ')
+        start = getattr(self, '_sent_samples', 0)
+        self._sent_samples = start + len(self._pending_pcm) // 2
+        return {'type': 'websocket.receive', 'text': json.dumps({'type': 'audio', 'startSample': start})}
     async def close(self, **_kwargs):
         self.closed = _kwargs
         self.finished.set()
@@ -133,7 +140,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
             patch.object(route.settings, "openrouter_api_key", "test-key"),
             patch.object(route, "JevService", UncertainJev),
             patch.object(route, "LlmService", FakeLlm),
-            patch.object(route, "transcribe_snapshot", transcribe),
+            patch.object(route, "AmazonStreamingTranscription", transcription_stream(transcribe)),
         ):
             await asyncio.wait_for(route.meeting_stream(socket), timeout=2)
         items = [m for m in socket.sent if m["type"] == "timeline_snapshot"][-1]["items"]
@@ -160,7 +167,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(route.settings, "openrouter_api_key", "test-key"),
                     patch.object(route, "JevService", RecoveringJev),
                     patch.object(route, "LlmService", FakeLlm),
-                    patch.object(route, "transcribe_snapshot", transcribe),
+                    patch.object(route, "AmazonStreamingTranscription", transcription_stream(transcribe)),
                 ):
                     await asyncio.wait_for(route.meeting_stream(websocket), timeout=4)
                 self.assertEqual(len(calls), 3)
@@ -187,7 +194,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
             patch.object(route.settings, "openrouter_api_key", "test-key"),
             patch.object(route, "JevService", UnavailableJev),
             patch.object(route, "LlmService", FakeLlm),
-            patch.object(route, "transcribe_snapshot", transcribe),
+            patch.object(route, "AmazonStreamingTranscription", transcription_stream(transcribe)),
         ):
             runner = asyncio.create_task(route.meeting_stream(socket))
             try:
@@ -217,7 +224,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
             patch.object(route.settings, "openrouter_api_key", "test-key"),
             patch.object(route, "JevService", FakeJev),
             patch.object(route, "LlmService", FakeLlm),
-            patch.object(route, "transcribe_snapshot", transcribe),
+            patch.object(route, "AmazonStreamingTranscription", transcription_stream(transcribe)),
         ):
             await asyncio.wait_for(route.meeting_stream(websocket), timeout=4)
 
@@ -248,7 +255,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
             patch.object(route.settings, "openrouter_api_key", "test-key"),
             patch.object(route, "JevService", FakeJev),
             patch.object(route, "LlmService", FakeLlm),
-            patch.object(route, "transcribe_snapshot", transcribe),
+            patch.object(route, "AmazonStreamingTranscription", transcription_stream(transcribe)),
         ):
             await asyncio.wait_for(route.meeting_stream(websocket), timeout=4)
 
@@ -304,7 +311,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
                 websocket = ContinuingSocket()
                 websocket.app.state.atlassian = FailingAtlassian()
                 async def transcribe(audio):
-                    return {"audio_duration": 3, "segments": [{"start": 0, "end": 3, "text": "Please send the launch plan to Maya." if audio == b"first" else "Now the next topic is checkout."}]}
+                    return {"audio_duration": 3, "segments": [{"start": 0, "end": 3, "text": "Please send the launch plan to Maya." if audio.rstrip() == b"first" else "Now the next topic is checkout."}]}
 
                 with (
                     patch.object(route, 'provider_session', scoped_provider),
@@ -313,7 +320,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
             patch.object(route.settings, "openrouter_api_key", "test-key"),
                     patch.object(route, "JevService", FakeJev),
                     patch.object(route, "LlmService", FakeLlm),
-                    patch.object(route, "transcribe_snapshot", transcribe),
+                    patch.object(route, "AmazonStreamingTranscription", transcription_stream(transcribe)),
                 ):
                     await asyncio.wait_for(route.meeting_stream(websocket), timeout=5)
                 updates = [message for message in websocket.sent if message["type"] == "transcription_state"]
@@ -341,7 +348,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
             return {'audio_duration': 3, 'segments': [{'start': 0, 'end': 3, 'text': 'Please send the launch plan to Maya.'}]}
         class UncertainJev(FakeJev):
             async def decide(self, recent, new, **_kwargs): return JevDecision(.4, .4)
-        with self.assertLogs('meeting_intelligence', level='INFO') as captured, patch.object(route, 'provider_session', real_provider), patch.object(GoogleDriveService, '__init__', init), patch.object(route.settings, 'openrouter_api_key', 'test-key'), patch.object(route, 'JevService', UncertainJev), patch.object(route, 'LlmService', FakeLlm), patch.object(route, 'transcribe_snapshot', transcribe):
+        with self.assertLogs('meeting_intelligence', level='INFO') as captured, patch.object(route, 'provider_session', real_provider), patch.object(GoogleDriveService, '__init__', init), patch.object(route.settings, 'openrouter_api_key', 'test-key'), patch.object(route, 'JevService', UncertainJev), patch.object(route, 'LlmService', FakeLlm), patch.object(route, 'AmazonStreamingTranscription', transcription_stream(transcribe)):
             await asyncio.wait_for(asyncio.gather(*(route.meeting_stream(s) for s in sockets)), timeout=5)
         from app.core.observability import JsonFormatter
         logs = [json.loads(JsonFormatter().format(record)) for record in captured.records]
@@ -350,7 +357,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len({entry['meeting_id'] for entry in own}), 1)
             self.assertEqual(len({entry['connection_id'] for entry in own}), 1)
             self.assertEqual(len({entry['request_id'] for entry in own}), 1)
-            self.assertTrue(any(entry['event'] == 'meeting.transcription.accepted' and entry['sequence'] == 1 for entry in own))
+            self.assertTrue(any(entry['event'] == 'meeting.transcription.accepted' and entry['sequence'] == 3200 for entry in own))
             self.assertTrue(any(entry['event'] == 'meeting.search.results' and entry['provider'] == 'google_drive' for entry in own))
             self.assertTrue(any(entry['event'] == 'meeting.operation.completed' and entry.get('stage') == 'intent_review' for entry in own))
         self.assertEqual(len({entry['connection_id'] for entry in logs}), 2)
@@ -371,7 +378,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
                 return {'type': 'websocket.receive', 'text': json.dumps({'ticket': ticket})}
         socket = SwitchedSocket(); socket.app.state.users = db
         db.test_drive = FakeDrive()
-        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''):
+        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''), patch.object(route, 'AmazonStreamingTranscription', DefaultStream):
             await asyncio.wait_for(route.meeting_stream(socket), timeout=2)
         self.assertEqual(socket.closed['code'], 4401)
         self.assertFalse(socket.received_audio)
@@ -385,7 +392,7 @@ class MeetingStreamTimelineTests(unittest.IsolatedAsyncioTestCase):
                 if message['type'] == 'timeline_snapshot':
                     await db.put('REVOKED#family-A', {'expiresAt': int(time.time()) + 86400})
         socket = RevokedSocket(); socket.app.state.users = db; db.test_drive = FakeDrive()
-        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''):
+        with patch.object(route, 'provider_session', scoped_provider), patch.object(route.settings, 'openrouter_api_key', ''), patch.object(route, 'AmazonStreamingTranscription', DefaultStream):
             await asyncio.wait_for(route.meeting_stream(socket), timeout=2)
         self.assertEqual(socket.closed['code'], 4401)
         self.assertFalse(any(m.get('type') == 'transcription_state' for m in socket.sent))

@@ -1,5 +1,7 @@
 # Controlled AWS streaming test — 21 October 2026
 
+Historical measurement; the current implementation and release checks are in [0.1.13](../../releases/0.1.13.md). One-off benchmark runners were retired after these results were recorded; they remain in Git at `c407c1c`.
+
 **Scope: same AWS service and recognition settings; continuous audio context versus three-second recognition-context resets.**
 
 **The comparison between different providers using genuine streaming remains incomplete. This report measures AWS session boundaries only.**
@@ -66,17 +68,6 @@ Both initial connections are ready before the shared playback clock starts. Each
 - [Supplemental OpenRouter chunked-model comparison](../stt-openrouter-2026-10-20/REPORT.md)
 - [Original corpus provenance and offline accuracy control](../stt-2026-10-19/REPORT.md)
 
-## Reproduce
-
-From `backend/`:
-
-```sh
-.venv/bin/python stt_aws_context_control.py /path/to/corpus/manifest.json \
-  --profile YOUR_EXISTING_PROFILE --output /tmp/mi-aws-context-results.json
-# Plan only by default. Append --execute to permit paid calls.
-.venv/bin/python stt_aws_context_report.py /tmp/mi-aws-context-results.json \
-  --output ../docs/benchmarks/stt-streaming-control-2026-10-21/REPORT.md
-```
 
 ## Sources
 

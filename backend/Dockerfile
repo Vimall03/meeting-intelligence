@@ -10,15 +10,13 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 FROM python:3.11-slim-bookworm AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 meeting \
     && useradd --uid 10001 --gid meeting --create-home meeting
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    OPENBLAS_NUM_THREADS=1 \
-    OMP_NUM_THREADS=1
+    PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 COPY --from=dependencies /opt/venv /opt/venv
 COPY --chown=meeting:meeting app/ ./app/

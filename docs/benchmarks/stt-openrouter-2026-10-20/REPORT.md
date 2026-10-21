@@ -1,5 +1,7 @@
 # OpenRouter transcription comparison — 20 October 2026
 
+Historical measurement; the current implementation and release checks are in [0.1.13](../../releases/0.1.13.md). One-off benchmark runners were retired after these results were recorded; they remain in Git at `c407c1c`.
+
 **Status: all seven OpenRouter configurations measured.**
 
 **The requested peer-provider streaming comparison remains incomplete. This is a supplemental chunked-model study; AWS is the only service measured with continuous audio input.**
@@ -125,16 +127,6 @@ The offline control gets the complete recording before transcription; its accura
 
 Machine-readable evidence: [results.json](openrouter-results.json), [catalog and prices](openrouter-catalog.json), [earlier 20 October report](../stt-providers-2026-10-20/REPORT.md), [original report and audio attribution](../stt-2026-10-19/REPORT.md).
 
-## Reproduce / resume
-
-From `backend/`:
-
-```sh
-.venv/bin/python stt_openrouter_benchmark.py /path/to/corpus/manifest.json \
-  --catalog /path/to/openrouter-catalog.json --output /tmp/mi-openrouter-results.json
-# Review the plan; append --execute to permit paid calls.
-# Resume requires the same code, catalog, corpus, repeat count and estimate limit.
-```
 
 ## Sources
 

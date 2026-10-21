@@ -26,11 +26,3 @@ export function isGoogleDriveCallbackUrl(url: string, redirectUri: string) {
     return false;
   }
 }
-
-// Each window is a self-contained WebM/Opus recording sent to the backend.
-// Kept short so new speech reaches Jev and the pending-event enrichment
-// buffer quickly instead of waiting on one long window.
-export const AUDIO_MIME_TYPE = 'audio/webm;codecs=opus';
-export const AUDIO_WINDOW_MS = 3_000;
-// Experimental canary only. Both this build flag and server availability are required.
-export const STREAMING_TRANSCRIPTION = import.meta.env.WXT_STREAMING_TRANSCRIPTION === 'true';

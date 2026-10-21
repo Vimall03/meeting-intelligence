@@ -1,5 +1,4 @@
 from contextlib import asynccontextmanager
-import asyncio
 from app.services.meeting_sessions import MeetingConnections
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +16,6 @@ from app.api.routes.mom import router as mom_router
 from app.core.config import settings
 from app.core.user_messages import product_error
 from app.services.user_store import UserStore, StoreConflict
-from app.services.openrouter_stt_service import close_transcription_service
 from app.core.observability import configure_logging, RequestLogMiddleware, log_event, log_context, error_fields
 
 configure_logging()
@@ -29,7 +27,6 @@ async def lifespan(app):
     yield
     log_event('service.draining', active_sockets=len(app.state.meetings.sockets))
     await app.state.meetings.drain()
-    await asyncio.to_thread(close_transcription_service)
     log_event('service.stopped')
 
 

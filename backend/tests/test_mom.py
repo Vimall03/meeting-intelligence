@@ -21,6 +21,7 @@ from app.core.auth import Principal
 from app.core.config import settings
 from test_auth_integration import MemoryStore
 from test_meeting_recovery import RecoverySocket, window
+from streaming_fakes import transcription_stream, DefaultStream
 from test_meeting_stream_timeline import route, FakeJev, FakeLlm
 
 
@@ -455,7 +456,7 @@ class MomStreamTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(5.4)
                 return {'type': 'websocket.receive', 'text': json.dumps({'type': 'end', 'lastSequence': 0})}
         ws = Socket(db); ws.app.state.mom = repo
-        with patch.object(route, 'mom_available', return_value=True), patch.object(route, 'mom_repository', return_value=repo):
+        with patch.object(route, 'mom_available', return_value=True), patch.object(route, 'mom_repository', return_value=repo), patch.object(route, 'AmazonStreamingTranscription', DefaultStream):
             await asyncio.wait_for(route.meeting_stream(ws), 7)
         self.assertEqual(len(repo.s3.arguments), 1)
         self.assertEqual(len(db.crypto.keys), 1)
@@ -473,28 +474,38 @@ class MomStreamTests(unittest.IsolatedAsyncioTestCase):
         class Socket(RecoverySocket):
             async def receive_text(self):
                 payload=json.loads(await super().receive_text());payload['roomId']=room;return json.dumps(payload)
-        frames=window(1,'first')+window(2,'second')+[{'type':'websocket.receive','text':json.dumps({'type':'finish','lastSequence':2})}]
+        frames=window(1,'first')+window(2,'second')+[{'type':'websocket.receive','text':json.dumps({'type':'finish','lastSequence':6400})}]
         ws=Socket(db,frames);ws.app.state.mom=repo
         async def transcribe_audio(audio):
             await asyncio.sleep(.01)
-            return {'audio_duration':3,'segments':[{'text':audio.decode(),'start':0,'end':3}]}
+            return {'audio_duration':3,'segments':[{'text':audio.decode().strip(),'start':0,'end':3}]}
         def forbidden(*args,**kwargs):raise AssertionError('Live provider invoked in MOM-only mode')
         with patch.object(route,'mom_available',return_value=True),patch.object(route,'mom_repository',return_value=repo),\
              patch.object(route,'provider_session',forbidden),patch.object(route,'JevService',forbidden),patch.object(route,'LlmService',forbidden),\
-             patch.object(route,'transcribe_snapshot',transcribe_audio),patch.object(route.settings,'openrouter_api_key','test-key'):
+             patch.object(route,'AmazonStreamingTranscription',transcription_stream(transcribe_audio)),patch.object(route.settings,'openrouter_api_key','test-key'):
             await asyncio.wait_for(route.meeting_stream(ws),3)
         session=next(row for row in repo.rows.values() if row.get('sessionId'))
         self.assertEqual(session['state'],'ready')
         self.assertEqual(session['roomId'], room)
         self.assertEqual([line.split('] ',1)[1] for line in transcript(repo,session).splitlines()],['first','second'])
-        self.assertTrue(any(message['type']=='meeting_segment_ended' and message['ack']==2 for message in ws.sent))
+        self.assertTrue(any(message['type']=='meeting_segment_ended' and message['ack']==6400 for message in ws.sent))
         recovery=db.rows['USER#A#MEETING#meeting-1']
         checkpoint=await db.decrypt('A','meeting-state',recovery['cipher'])
         self.assertEqual(checkpoint['transcript'],'');self.assertEqual(checkpoint['context'],{})
-        saved=repo.load_checkpoint(session,'meeting-1');self.assertEqual(saved['ack'],2)
+        saved=repo.load_checkpoint(session,'meeting-1');self.assertEqual(saved['ack'],6400)
         self.assertEqual(saved['transcript'],'first second')
 
 class AdditionalMomTests(unittest.TestCase):
+    def test_recovering_one_capture_preserves_other_missing_audio(self):
+        repo=MemoryRepository();repo.set_preferences('A','both','UTC','verified-A')
+        first=repo.begin('A','abc-defg-hij','first')
+        repo.detach(first,incomplete=True,capture='first')
+        second=repo.begin('A','abc-defg-hij','second')
+        repo.detach(second,incomplete=False,capture='second')
+        row=repo.get(first['pk'])
+        self.assertTrue(row['incomplete']);self.assertEqual(row['incompleteCaptures'],['first'])
+
+
     def test_concurrent_room_creation_cannot_replace_a_new_active_pointer(self):
         from concurrent.futures import ThreadPoolExecutor
         repo=MemoryRepository();repo.set_preferences('A','both','UTC','verified-A')
@@ -515,22 +526,6 @@ class AdditionalMomTests(unittest.TestCase):
             {'Name':'sub','Value':'A'},{'Name':'email','Value':'verified@example.com'},{'Name':'email_verified','Value':'true'}]})
         with self.assertRaises(MomError):verified_email(cognito,'pool',row)
 
-
-class AudioCleanupTests(unittest.IsolatedAsyncioTestCase):
-    async def test_cancelling_transcription_waits_for_thread_and_removes_temp_directory(self):
-        started=threading.Event();release=threading.Event();paths=[]
-        def transcribe(path):
-            from pathlib import Path
-            paths.append(Path(path));started.set();release.wait(2)
-            self.assertTrue(Path(path).exists())
-            return {'segments':[],'audio_duration':3}
-        with patch.object(route,'transcribe_realtime_chunk',transcribe):
-            task=asyncio.create_task(route.transcribe_snapshot(b'audio'))
-            await asyncio.to_thread(started.wait,1)
-            task.cancel();await asyncio.sleep(.01)
-            self.assertTrue(paths[0].exists());release.set()
-            with self.assertRaises(asyncio.CancelledError):await task
-        self.assertFalse(paths[0].exists());self.assertFalse(paths[0].parent.exists())
 
 class MinutesEmailTests(unittest.TestCase):
     def test_html_escapes_model_text_and_uses_only_simple_inline_presentation(self):

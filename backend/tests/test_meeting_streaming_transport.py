@@ -28,6 +28,7 @@ class Stream:
         self.closed=True
         if self.frames:await self.queue.put(TranscriptUpdate('one','Please send the launch plan to Maya.',0,self.audio_seconds,True))
         await self.queue.put(None)
+    async def abort(self):self.closed=True
     async def updates(self):
         while (event:=await self.queue.get()) is not None:yield event
 
@@ -44,27 +45,26 @@ class Socket:
     async def receive_text(self):
         ticket=await issue_ticket(Principal('A','family-A',int(time.time())+900),self.app.state.users)
         return json.dumps({'ticket':'bad' if self.bad_ticket else ticket,'meetingId':'streaming-test',
-            'lastAck':0,'audioFormat':'pcm_s16le_16000','roomId':'abc-defg-hij'})
+            'lastAck':0,'audioFormat':'pcm_s16le_16000_v2','roomId':'abc-defg-hij'})
     async def receive(self):return await self.queue.get()
     async def close(self,**kwargs):self.closed=kwargs;self.done.set()
     async def send_json(self,message):
         self.sent.append(message)
         if message['type']=='auth_ready':
             for sequence in range(1,7):
-                await self.queue.put({'text':json.dumps({'type':'audio','sequence':sequence})})
+                await self.queue.put({'text':json.dumps({'type':'audio','startSample':(sequence-1)*3200})})
                 await self.queue.put({'bytes':bytes(self.size)})
             if not self.wait_for_cards:
-                await self.queue.put({'text':json.dumps({'type':'finish' if self.finish else 'end','lastSequence':6})})
+                await self.queue.put({'text':json.dumps({'type':'finish' if self.finish else 'end','lastSequence':19200})})
         if self.wait_for_cards and message['type']=='timeline_snapshot' and message['revision']>=2:
-            await self.queue.put({'text':json.dumps({'type':'end','lastSequence':6})})
+            await self.queue.put({'text':json.dumps({'type':'end','lastSequence':19200})})
         if message['type']=='meeting_segment_ended':self.done.set()
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
-    async def run_socket(self,socket,enabled=True,repo=None,stream_class=Stream,live=False):
+    async def run_socket(self,socket,repo=None,stream_class=Stream,live=False):
         Stream.instances=[]
-        with patch.object(route.settings,'streaming_stt_enabled',enabled), \
-             patch.object(route.settings,'mom_enabled',False), \
+        with patch.object(route.settings,'mom_enabled',False), \
              patch.object(route,'mom_available',return_value=repo is not None), \
              patch.object(route,'mom_repository',return_value=repo), \
              patch.object(route.settings,'openrouter_api_key','test-key' if live else ''), \
@@ -82,19 +82,17 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m['transcript'] for m in socket.sent if m['type']=='transcription_state'],
             ['Please send the launch plan to Maya.'])
         ended=[m for m in socket.sent if m['type']=='meeting_segment_ended']
-        self.assertEqual(ended,[{'type':'meeting_segment_ended','ack':6,'minutesFinalizing':False}])
+        self.assertEqual(ended,[{'type':'meeting_segment_ended','ack':19200,'minutesFinalizing':False}])
         row=socket.app.state.users.rows['USER#A#MEETING#streaming-test']
         saved=await socket.app.state.users.decrypt('A','meeting-state',row['cipher'])
         self.assertEqual(saved['transcript'],'Please send the launch plan to Maya.')
-        self.assertEqual(saved['transport'],'pcm_s16le_16000')
+        self.assertEqual(saved['transport'],'pcm_s16le_16000_v2')
         self.assertAlmostEqual(saved['audioEnd'],1.2)
 
-    async def test_disabled_transport_and_bad_auth_never_open_provider(self):
-        for enabled,bad in [(False,False),(True,True)]:
-            with self.subTest(enabled=enabled,bad=bad):
-                socket=Socket(bad_ticket=bad);await self.run_socket(socket,enabled)
-                self.assertEqual(Stream.instances,[])
-                self.assertIsNotNone(socket.closed)
+    async def test_bad_auth_never_opens_provider(self):
+        socket=Socket(bad_ticket=True);await self.run_socket(socket)
+        self.assertEqual(Stream.instances,[])
+        self.assertIsNotNone(socket.closed)
 
     async def test_oversized_pcm_is_rejected_and_provider_closed(self):
         socket=Socket(size=6402);await self.run_socket(socket)
@@ -102,12 +100,13 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(Stream.instances[0].closed)
         self.assertEqual(socket.closed['reason'],'MI-STT-001')
 
-    async def test_stream_receipt_does_not_allow_legacy_replay(self):
+    async def test_saved_progress_resumes_with_a_new_provider_and_same_timeline(self):
         socket=Socket();await self.run_socket(socket)
-        socket.sent=[];socket.done=asyncio.Event()
+        socket.sent=[];socket.done=asyncio.Event();socket.closed=None
         await self.run_socket(socket)
-        self.assertEqual(Stream.instances,[])
-        self.assertEqual(socket.closed['code'],4409)
+        self.assertEqual(len(Stream.instances),1)
+        self.assertEqual(Stream.instances[0].frames,[])
+        self.assertEqual(next(m for m in socket.sent if m['type']=='auth_ready')['ack'],19200)
 
     async def test_recap_finishes_after_provider_final_and_excludes_partial_text(self):
         from test_mom import MemoryRepository,transcript

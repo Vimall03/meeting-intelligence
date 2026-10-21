@@ -1,5 +1,7 @@
 # Transcription provider comparison — 20 October 2026
 
+Historical measurement; the current implementation and release checks are in [0.1.13](../../releases/0.1.13.md). One-off benchmark runners were retired after these results were recorded; they remain in Git at `c407c1c`.
+
 The [21 October controlled AWS streaming test](../stt-streaming-control-2026-10-21/REPORT.md) measures continuous recognition versus context resets. The [OpenRouter comparison](../stt-openrouter-2026-10-20/REPORT.md) is a supplemental chunked-model study. The requested peer-provider streaming comparison remains incomplete; direct streaming configurations below remain untested.
 
 **Status: incomplete; the new streaming providers still require credentials or successful runs.**
@@ -103,20 +105,6 @@ Unfinished live tests require these local environment variables:
 
 Put keys in the ignored `backend/.env` or the process environment; never put keys in chat or Git. The other providers cannot be ranked on accuracy or latency until those tests run.
 
-## Reproduce / resume
-
-From `backend/`:
-
-```sh
-.venv/bin/python stt_provider_benchmark.py /path/to/corpus/manifest.json \
-  --profile YOUR_TEST_PROFILE --output /tmp/mi-provider-results.json
-# Review the plan; append --execute to permit paid calls.
-# Run the identical command again to fill newly configured providers.
-.venv/bin/python stt_benchmark_report.py /tmp/mi-provider-results.json \
-  --output ../docs/benchmarks/stt-providers-2026-10-20/REPORT.md
-```
-
-Resume requires unchanged code, models, corpus and repeat count. Saved successful/failed/interrupted attempts are skipped. Audio stays outside Git. The original generator, corpus manifest and licences are documented in [the original report](../stt-2026-10-19/REPORT.md).
 
 ## Sources
 

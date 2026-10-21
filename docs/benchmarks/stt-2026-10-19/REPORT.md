@@ -1,5 +1,7 @@
 # Streaming transcription comparison — 19 October 2026
 
+Historical measurement; the current implementation and release checks are in [0.1.13](../../releases/0.1.13.md). One-off benchmark runners were retired after these results were recorded; they remain in Git at `c407c1c`.
+
 Later evidence: the [21 October controlled AWS streaming test](../stt-streaming-control-2026-10-21/REPORT.md) examines context boundaries, and the [20 October OpenRouter comparison](../stt-openrouter-2026-10-20/REPORT.md) compares chunked models and costs. This report preserves the original experiment. Peer-provider streaming comparisons remain incomplete.
 
 **Decision: keep the streaming implementation as a disabled canary.** It improves typical final-text latency and accuracy in this controlled test, but sustained noise produces worse tail latency, and transparent reconnect/replay is not yet implemented for the new transport. The public 0.1.12 package and its Web Store submission are unchanged.
@@ -58,7 +60,7 @@ OpenRouter cost uses provider-reported `usage.cost` where available. The three r
 
 The streaming browser transport sends **256 kbit/s**, approximately 1.92 MB/minute of PCM before protocol overhead. That increases browser upload bandwidth relative to compressed capture. It removes the per-window server FFmpeg decode and WAV/base64 conversion from the streaming path; it does not remove transcription inference. No local GPU/model server is added. Actual CPU, memory and production concurrency capacity have not been established by this experiment.
 
-## Implementation and verification
+## Historical implementation and verification
 
 - Version 0.1.13 canary on branch `streaming-transcription`; default builds retain the existing capture method.
 - The existing tab/microphone mix feeds a bundled AudioWorklet, producing continuous 200 ms PCM frames. The worklet emits silence to the playback output, avoiding microphone feedback, and flushes the final partial frame.
@@ -70,25 +72,8 @@ The streaming browser transport sends **256 kbit/s**, approximately 1.92 MB/minu
 - Automated checks cover clipping/frame boundaries, final-frame flush, immediate microphone release, connection-loss failure, disabled mode, authentication, input limits, partial/final separation, live task/search output, recap finalization and resume rejection. See the corresponding backend and extension tests.
 - Validation passed: **174 backend checks**, **99 extension checks**, extension typecheck, default and canary production builds, canary ZIP integrity/identity, Linux production-image build, 10 Linux transcription/scorer checks and 6 Linux streaming-route checks with networking disabled. A source secret scan found no leaks. No production deployment, IAM change, website-package replacement or Web Store submission was made for this canary.
 
-## Reproduce
 
-Run from `backend/`, with the normal OpenRouter setting and an AWS profile permitted to call `transcribe:StartStreamTranscription`. The profile used to run the experiment is not embedded in source or the extension. The corpus generator requires macOS `say`, FFmpeg and network access for public samples.
-
-```sh
-uv sync --frozen
-uv run python make_stt_corpus.py /tmp/mi-stt-corpus
-uv run python stt_compare.py /tmp/mi-stt-corpus/manifest.json \
-  --profile YOUR_TEST_PROFILE --region ap-south-1 \
-  --streaming-rate 0.006 --repeats 3 \
-  --output /tmp/mi-stt-results.json \
-  --whole-clip-control /tmp/mi-stt-whole-clip-control.json
-```
-
-Recheck prices before rerunning. Voice versions can differ across macOS versions; [manifest.json](manifest.json) records the exact original WAV hashes and reference timing. Audio is intentionally excluded from Git. [results.json](results.json) contains the per-run outputs, event times, error counts, common-pair latency statistics and failures. [whole-clip-control.json](whole-clip-control.json) contains the offline control outputs.
-
-LibriSpeech: Vassil Panayotov, Guoguo Chen, Daniel Povey and Sanjeev Khudanpur, **LibriSpeech: an ASR corpus based on public domain audio books** (2015), [OpenSLR resource 12](https://www.openslr.org/12/), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Clips were converted to mono PCM and appended with silence; their reference text was normalized only for scoring. Synthetic meeting scripts contain no private meeting material.
-
-## Promotion gate
+## Historical promotion gate
 
 Before enabling streaming for public users: implement and fault-test durable replay/recovery, address sustained-noise finalization, benchmark a broader human meeting corpus including overlap and accents, verify real Meet/Zoom audio capture, and measure representative concurrent load from the deployment region. Compare additional streaming providers or models on a held-out corpus rather than tuning this small test set. The present evidence supports continued streaming work, **not an unconditional production switch**.
 

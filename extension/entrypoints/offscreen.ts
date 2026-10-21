@@ -1,10 +1,10 @@
 import { problem, userError, microphoneProblem } from '../lib/user-messages';
-import { AUDIO_MIME_TYPE, AUDIO_WINDOW_MS, MEETING_SOCKET_URL, STREAMING_TRANSCRIPTION } from '../lib/config';
+import { MEETING_SOCKET_URL } from '../lib/config';
 import { PcmCapture } from '../lib/pcm-capture';
+import { PcmReplay, type PcmFrame } from '../lib/pcm-replay';
 import type { MomMode, MomMeeting } from '../lib/mom';
 import { isTimelineSnapshot } from '../lib/timeline';
 
-let recorder: MediaRecorder | undefined;
 let pcmCapture: PcmCapture | undefined;
 let tabStream: MediaStream | undefined;
 let microphoneStream: MediaStream | undefined;
@@ -15,7 +15,6 @@ let tabSource: MediaStreamAudioSourceNode | undefined;
 let microphoneSource: MediaStreamAudioSourceNode | undefined;
 let tabGain: GainNode | undefined;
 let microphoneGain: GainNode | undefined;
-let recordingWindowTimer: ReturnType<typeof setTimeout> | undefined;
 let audioHealthTimer: ReturnType<typeof setInterval> | undefined;
 let stopping = false;
 let captureGeneration = 0;
@@ -33,9 +32,10 @@ let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let reconnectStartedAt = 0;
 let reconnectAttempt = 0;
-let audioSequence = 0;
-let acknowledgedSequence = 0;
-let audioQueue: { sequence: number; data: Blob }[] = [];
+let replay = new PcmReplay();
+let pumpTimer: ReturnType<typeof setInterval> | undefined;
+let nextSendAt = 0;
+let recoveryCount = 0;
 let sentThrough = 0;
 let lastServerMessageAt = 0;
 let retryMicrophoneCapture: (() => void) | undefined;
@@ -44,13 +44,14 @@ function flushAudio() {
   const activeSocket = socket;
   if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || !socketAuthorized) return;
   try {
-    for (const window of audioQueue) {
-      if (window.sequence <= sentThrough) continue;
-      if ((activeSocket.bufferedAmount || 0) > 4_000_000) break;
-      activeSocket.send(JSON.stringify({ type: 'audio', sequence: window.sequence }));
-      activeSocket.send(window.data);
-      sentThrough = window.sequence;
-    }
+    const frame = replay.frames.find(frame => frame.end > sentThrough);
+    if (!frame || Date.now() < nextSendAt || (activeSocket.bufferedAmount || 0) > 64_000) return;
+    const start = Math.max(frame.start, sentThrough);
+    activeSocket.send(JSON.stringify({ type: 'audio', startSample: start }));
+    activeSocket.send(frame.data.slice((start-frame.start)*2));
+    sentThrough = frame.end;
+    // At most 2x real time while catching up; normal capture produces 5 frames/s.
+    nextSendAt = Date.now() + 100;
   } catch {
     retryConnection(activeSocket, captureGeneration);
   }
@@ -58,22 +59,16 @@ function flushAudio() {
 
 function retryConnection(failedSocket: WebSocket | undefined, generation: number) {
   if (generation !== captureGeneration || stopping || (failedSocket && socket !== failedSocket)) return;
-  // Canary transport deliberately fails closed: partial provider state cannot be
-  // safely replayed through the legacy window checkpoint protocol.
-  if (STREAMING_TRANSCRIPTION) {
-    notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-STT-001') });
-    void stop();
-    return;
-  }
   if (authTimer) clearTimeout(authTimer);
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   authTimer = heartbeatTimer = undefined;
   socket = undefined;
   socketAuthorized = false;
+  if (failedSocket) recoveryCount++;
   failedSocket?.close();
   notify({ captureStatus: 'connecting', backendConnected: false, error: problem('MI-CON-004') });
   if (!reconnectStartedAt) reconnectStartedAt = Date.now();
-  if (Date.now() - reconnectStartedAt >= 60_000) {
+  if (Date.now() - reconnectStartedAt >= 60_000 || recoveryCount > 5) {
     notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-CON-005') });
     void stop();
     return;
@@ -102,8 +97,8 @@ async function connectSocket(generation: number) {
   authTimer = setTimeout(handshakeTimeout, 10_000);
   sessionSocket.onopen = () => {
     if (socket !== sessionSocket || stopping) return;
-    sessionSocket.send(JSON.stringify({ type: 'authenticate', ticket: authorization.ticket, meetingId: captureSessionId, roomId, momSessionId: minutesSession?.sessionId, lastAck: acknowledgedSequence,
-      ...(STREAMING_TRANSCRIPTION ? { audioFormat: 'pcm_s16le_16000' } : {}) }));
+    sessionSocket.send(JSON.stringify({ type: 'authenticate', ticket: authorization.ticket, meetingId: captureSessionId, roomId, momSessionId: minutesSession?.sessionId, lastAck: replay.ack,
+      audioFormat: 'pcm_s16le_16000_v2' }));
   };
   sessionSocket.onerror = () => retryConnection(sessionSocket, generation);
   sessionSocket.onclose = event => {
@@ -119,7 +114,7 @@ async function connectSocket(generation: number) {
       const message = JSON.parse(event.data);
       lastServerMessageAt = Date.now();
       if (message.type === 'auth_ready' && typeof message.expiresAt === 'number') {
-        if (STREAMING_TRANSCRIPTION && message.audioFormat !== 'pcm_s16le_16000') {
+        if (message.audioFormat !== 'pcm_s16le_16000_v2') {
           retryConnection(sessionSocket, generation);
           return;
         }
@@ -130,7 +125,8 @@ async function connectSocket(generation: number) {
         authTimer = setTimeout(() => { void renewSocket(sessionSocket, generation); }, Math.max(1000, authorizedUntil - Date.now() - 120_000));
         if (firstAuthorization) {
           reconnectStartedAt = reconnectAttempt = 0;
-          sentThrough = acknowledgedSequence;
+          sentThrough = replay.ack;
+          nextSendAt = 0;
           if (heartbeatTimer) clearInterval(heartbeatTimer);
           heartbeatTimer = setInterval(() => {
             if (socket !== sessionSocket || stopping) return;
@@ -139,18 +135,16 @@ async function connectSocket(generation: number) {
             catch { retryConnection(sessionSocket, generation); }
           }, 15_000);
         }
-        if (Number.isSafeInteger(message.ack) && message.ack >= acknowledgedSequence && message.ack <= audioSequence) {
-          acknowledgedSequence = message.ack;
-          audioQueue = audioQueue.filter(window => window.sequence > acknowledgedSequence);
-          sentThrough = Math.max(sentThrough, acknowledgedSequence);
+        if (!replay.acknowledge(message.ack)) {
+          notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-CON-007') });
+          void stop();
+          return;
         }
+        sentThrough = Math.max(sentThrough, replay.ack);
         notify({ captureStatus: 'capturing', backendConnected: true, error: undefined });
         flushAudio();
-      } else if (socketAuthorized && message.type === 'audio_ack' && Number.isSafeInteger(message.sequence)
-        && message.sequence >= acknowledgedSequence && message.sequence <= audioSequence) {
-        acknowledgedSequence = message.sequence;
-        audioQueue = audioQueue.filter(window => window.sequence > acknowledgedSequence);
-        flushAudio();
+      } else if (socketAuthorized && message.type === 'audio_ack') {
+        if (replay.acknowledge(message.sequence)) flushAudio();
       } else if (socketAuthorized && message.type === 'mom_session' && /^[a-f0-9]{32}$/.test(message.sessionId)
         && ['mom_only', 'both'].includes(message.mode) && roomId && captureSessionId) {
         minutesGrace = Number.isFinite(message.graceSeconds) ? message.graceSeconds : 600;
@@ -186,16 +180,6 @@ function assertCurrent(generation: number) {
   if (generation !== captureGeneration || stopping) {
     throw new DOMException(problem('MI-CAP-006'), 'AbortError');
   }
-}
-
-function startRecordingWindow(activeRecorder: MediaRecorder) {
-  if (recorder !== activeRecorder || stopping) return;
-  activeRecorder.start();
-  recordingWindowTimer = setTimeout(() => {
-    if (recorder === activeRecorder && !stopping && activeRecorder.state === 'recording') {
-      activeRecorder.stop();
-    }
-  }, AUDIO_WINDOW_MS);
 }
 
 async function start(streamId: string, sessionId: string, room?: string, userId?: string, mode: MomMode = 'live_only') {
@@ -276,14 +260,11 @@ async function start(streamId: string, sessionId: string, room?: string, userId?
     throw error;
   }
 
-  if (!STREAMING_TRANSCRIPTION && !MediaRecorder.isTypeSupported(AUDIO_MIME_TYPE)) {
-    throw new Error(problem('MI-CAP-008'));
-  }
 
   notify({ captureStatus: 'connecting', backendConnected: false, timeline: undefined, error: undefined });
   await connectSocket(generation);
 
-  audioContext = new AudioContext(STREAMING_TRANSCRIPTION ? { sampleRate: 16000 } : undefined);
+  audioContext = new AudioContext({ sampleRate: 16000 });
   await audioContext.resume();
   assertCurrent(generation);
   const mix = audioContext.createMediaStreamDestination();
@@ -407,8 +388,7 @@ async function start(streamId: string, sessionId: string, room?: string, userId?
       void recoverMicrophone();
     }
   };
-  // A recording can continue producing silent WebM windows when its input
-  // ends or Web Audio is suspended. Check the actual sources, not just recorder.state.
+  // Check actual inputs: capture can still run while its sources are silent.
   audioHealthTimer = setInterval(() => {
     if (stopping || generation !== captureGeneration) return;
     const tabTracks = tabStream?.getAudioTracks() ?? [];
@@ -449,85 +429,63 @@ async function start(streamId: string, sessionId: string, room?: string, userId?
       : undefined });
   }, 3000);
 
+  pumpTimer = setInterval(flushAudio, 100);
   const enqueue = (data: Blob) => {
     if (generation !== captureGeneration || stopping || !data.size) return;
-    audioQueue.push({ sequence: ++audioSequence, data });
-    if (data.size > 2_000_000 || audioQueue.length > (STREAMING_TRANSCRIPTION ? 50 : 20) || audioQueue.reduce((size, window) => size + window.data.size, 0) > 12_000_000) {
+    try { replay.append(data); }
+    catch {
       notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-CON-005') });
       void stop();
       return;
     }
     flushAudio();
   };
-  if (STREAMING_TRANSCRIPTION) {
-    const capture = await PcmCapture.start(sessionContext, recordingStream, enqueue, () => {
-      if (generation !== captureGeneration || stopping) return;
-      notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-STT-001') });
-      void stop();
-    });
-    if (generation !== captureGeneration || stopping) {
-      await capture.finish(() => {});
-      throw new DOMException(problem('MI-CAP-006'), 'AbortError');
-    }
-    pcmCapture = capture;
-    return;
-  }
-  const activeRecorder = new MediaRecorder(recordingStream, { mimeType: AUDIO_MIME_TYPE });
-  recorder = activeRecorder;
-  activeRecorder.ondataavailable = (event) => {
-    if (recorder === activeRecorder) enqueue(event.data);
-  };
-  activeRecorder.onstop = () => {
-    if (recorder !== activeRecorder || stopping) return;
-    if (recordingWindowTimer) clearTimeout(recordingWindowTimer);
-    recordingWindowTimer = undefined;
-    startRecordingWindow(activeRecorder);
-  };
-  activeRecorder.onerror = () => {
-    if (recorder !== activeRecorder) return;
-    notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-CAP-004') });
+  const capture = await PcmCapture.start(sessionContext, recordingStream, enqueue, () => {
+    if (generation !== captureGeneration || stopping) return;
+    notify({ captureStatus: 'error', backendConnected: false, error: problem('MI-STT-001') });
     void stop();
-  };
-  startRecordingWindow(activeRecorder);
+  });
+  if (generation !== captureGeneration || stopping) {
+    await capture.finish(() => {});
+    throw new DOMException(problem('MI-CAP-006'), 'AbortError');
+  }
+  pcmCapture = capture;
 }
 
 function publishMinutes(meeting: MomMeeting, userId: string | undefined) {
   if (userId) chrome.runtime.sendMessage({ type: 'MOM_UPDATE', userId, meeting }).catch(() => undefined);
 }
 
-// Drain owns only the retired capture references. It cannot touch a new mic,
-// recorder, socket, queue, sequence counter or CAPTURE_STATE notification.
-function drainMinutes(activeSocket: WebSocket | undefined, activeRecorder: MediaRecorder | undefined,
-  queue: { sequence: number; data: Blob }[], sequence: number, sent: number, authorized: boolean,
+// Drain owns retired references only. Hardware stops before network finalization.
+function drainMinutes(activeSocket: WebSocket | undefined,
+  queue: PcmFrame[], sequence: number, sent: number, authorized: boolean,
   finishMinutes: boolean): Promise<boolean> {
   if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || !authorized) return Promise.resolve(false);
   return new Promise(resolve => {
-    let ended = false, recorderDone = !activeRecorder, controlSent = false;
+    let ended = false, controlSent = false;
     let pumpTimer: ReturnType<typeof setInterval> | undefined;
     let deadline: ReturnType<typeof setTimeout> | undefined;
-    let recorderDeadline: ReturnType<typeof setTimeout> | undefined;
     const complete = (ok: boolean) => {
       if (ended) return;
       ended = true;
       if (pumpTimer) clearInterval(pumpTimer);
       if (deadline) clearTimeout(deadline);
-      if (recorderDeadline) clearTimeout(recorderDeadline);
-      if (activeRecorder) { activeRecorder.ondataavailable = null; activeRecorder.onstop = null; activeRecorder.onerror = null; }
       activeSocket.onmessage = null;
       activeSocket.onclose = null;
       activeSocket.onerror = null;
       resolve(ok);
     };
     const pump = () => {
-      if (ended || !recorderDone) return;
+      if (ended) return;
       try {
         if (activeSocket.readyState !== WebSocket.OPEN) { complete(false); return; }
-        for (const window of queue) {
-          if (window.sequence <= sent) continue;
-          if ((activeSocket.bufferedAmount || 0) > 4_000_000) return;
-          activeSocket.send(JSON.stringify({ type: 'audio', sequence: window.sequence }));
-          activeSocket.send(window.data);
-          sent = window.sequence;
+        const frame = queue.find(frame => frame.end > sent);
+        if (frame) {
+          if ((activeSocket.bufferedAmount || 0) > 64_000) return;
+          const start = Math.max(frame.start, sent);
+          activeSocket.send(JSON.stringify({ type: 'audio', startSample: start }));
+          activeSocket.send(frame.data.slice((start-frame.start)*2));
+          sent = frame.end;
         }
         if (!controlSent && sent === sequence) {
           controlSent = true;
@@ -541,22 +499,13 @@ function drainMinutes(activeSocket: WebSocket | undefined, activeRecorder: Media
         const message = JSON.parse(event.data);
         if (controlSent && message.type === 'meeting_segment_ended' && message.ack === sequence
           && message.minutesFinalizing === finishMinutes) complete(true);
-      } catch { /* Only an exact segment acknowledgment completes the drain. */ }
+      } catch { /* Only an exact durable acknowledgment completes the drain. */ }
     };
     activeSocket.onclose = activeSocket.onerror = () => complete(false);
-    deadline = setTimeout(() => complete(false), 35_000);
+    // 90 seconds of retained audio at 2x plus recognition drain and setup.
+    deadline = setTimeout(() => complete(false), 70_000);
     pumpTimer = setInterval(pump, 100);
-    if (activeRecorder) {
-      activeRecorder.ondataavailable = event => {
-        if (ended || !event.data.size) return;
-        if (event.data.size > 2_000_000 || queue.length >= 20 || queue.reduce((size, item) => size + item.data.size, 0) + event.data.size > 12_000_000) { complete(false); return; }
-        queue.push({ sequence: ++sequence, data: event.data });
-      };
-      activeRecorder.onstop = () => { recorderDone = true; if (recorderDeadline) clearTimeout(recorderDeadline); pump(); };
-      activeRecorder.onerror = () => complete(false);
-      // An inactive recorder can still have its last data/stop events queued.
-      recorderDeadline = setTimeout(() => complete(false), 1500);
-    } else pump();
+    pump();
   });
 }
 
@@ -565,14 +514,19 @@ async function stop(finishMinutes = false): Promise<{ warning?: string }> {
   const retiringUser = captureUserId;
   const retiringGrace = minutesGrace;
   const needsMinutes = captureMode !== 'live_only' || !!retiringMinutes;
+  finishMinutes = finishMinutes && !!minutesSession;
   const wasAuthorized = socketAuthorized;
-  const pendingAudio = audioQueue.slice();
-  let finalSequence = audioSequence;
+  const pendingAudio = replay.frames.slice();
+  let finalSequence = replay.end;
   const lastSent = sentThrough;
   const activePcm = pcmCapture;
   pcmCapture = undefined;
   const pcmFinished = activePcm?.finish(data => {
-    if (data.size) pendingAudio.push({ sequence: ++finalSequence, data });
+    if (data.size) {
+      const start = finalSequence;
+      finalSequence += data.size / 2;
+      pendingAudio.push({ start, end: finalSequence, data });
+    }
   });
   // Attach a rejection handler immediately; hardware cleanup happens before awaiting it.
   void pcmFinished?.catch(() => undefined);
@@ -586,16 +540,14 @@ async function stop(finishMinutes = false): Promise<{ warning?: string }> {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   reconnectTimer = heartbeatTimer = undefined;
   reconnectStartedAt = reconnectAttempt = 0;
-  audioSequence = acknowledgedSequence = sentThrough = 0;
-  audioQueue = [];
+  sentThrough = nextSendAt = recoveryCount = 0;
+  replay = new PcmReplay();
+  if (pumpTimer) clearInterval(pumpTimer);
+  pumpTimer = undefined;
   if (authTimer) clearTimeout(authTimer);
   authTimer = undefined;
-  if (recordingWindowTimer) clearTimeout(recordingWindowTimer);
-  recordingWindowTimer = undefined;
   if (audioHealthTimer) clearInterval(audioHealthTimer);
   audioHealthTimer = undefined;
-  const activeRecorder = recorder;
-  recorder = undefined;
   const activeRecordingStream = recordingStream;
   const activeTabStream = tabStream;
   const activeMicrophoneStream = microphoneStream;
@@ -614,16 +566,12 @@ async function stop(finishMinutes = false): Promise<{ warning?: string }> {
   tabGain = microphoneGain = undefined;
   retryMicrophoneCapture = undefined;
 
-  const drained = activePcm
-    ? (async () => {
-      try { await pcmFinished; } catch { return false; }
-      return drainMinutes(activeSocket, undefined, pendingAudio, finalSequence, lastSent, wasAuthorized, finishMinutes);
-    })()
-    : needsMinutes && retiringMinutes
-      ? drainMinutes(activeSocket, activeRecorder, pendingAudio, finalSequence, lastSent, wasAuthorized, finishMinutes)
-      : undefined;
+  const drained = activePcm ? (async () => {
+    try { await pcmFinished; } catch { return false; }
+    return drainMinutes(activeSocket, pendingAudio, finalSequence, lastSent, wasAuthorized, finishMinutes);
+  })() : undefined;
 
-  // Release the selected tab and mic before waiting for MediaRecorder to stop.
+  // Release the selected tab and mic before waiting for any network work.
   activeRecordingStream?.getTracks().forEach((track) => track.stop());
   activeTabStream?.getTracks().forEach((track) => track.stop());
   activeMicrophoneStream?.getTracks().forEach((track) => track.stop());
@@ -633,25 +581,6 @@ async function stop(finishMinutes = false): Promise<{ warning?: string }> {
   activeTabGain?.disconnect();
   activeMicrophoneGain?.disconnect();
 
-  if (activeRecorder && activeRecorder.state !== 'inactive') {
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const recorderStopped = new Promise<void>((resolve) => {
-      const finish = () => {
-        if (timeout) clearTimeout(timeout);
-        resolve();
-      };
-      activeRecorder.addEventListener('stop', finish, { once: true });
-      activeRecorder.addEventListener('error', finish, { once: true });
-      timeout = setTimeout(finish, 750);
-    });
-    try {
-      activeRecorder.stop();
-    } catch {
-      // Tracks are already released; a recorder that stopped concurrently
-      // must not prevent cleanup or a later capture attempt.
-    }
-    await recorderStopped;
-  }
   // Close the mixer independently of network processing; hardware is already off.
   // Flush the worklet's final sub-frame while the mixer can still render.
   if (pcmFinished) await pcmFinished.catch(() => undefined);
@@ -660,7 +589,7 @@ async function stop(finishMinutes = false): Promise<{ warning?: string }> {
   activeSocket?.close();
   if (retiringMinutes) publishMinutes({ ...retiringMinutes, state: complete && finishMinutes ? 'ready' : 'active',
     finalizeAfter: Math.floor(Date.now() / 1000) + retiringGrace, supportCode: complete ? undefined : 'MI-MOM-003' }, retiringUser);
-  return complete ? {} : { warning: problem('MI-MOM-003') };
+  return complete ? {} : { warning: problem(retiringMinutes ? 'MI-MOM-003' : 'MI-STT-002') };
 }
 
 function notify(state: Record<string, unknown>) {
